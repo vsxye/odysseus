@@ -237,6 +237,32 @@ pre.prompt {
 .catalog-bar h2 { margin-bottom: 10px; }
 #cat-filter { margin-bottom: 16px; }
 
+/* history */
+.btn[hidden] { display: none; }
+.btn.small { font-size: 14px; padding: 8px 14px; border-radius: 12px; margin-left: auto; }
+.hist-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.hist-row {
+  display: flex; align-items: stretch; gap: 6px;
+  border: 1px solid var(--border); background: var(--surface-solid); border-radius: 16px;
+  animation: slidein 0.4s var(--ease) both; transition: border-color 0.15s;
+}
+.hist-row:hover { border-color: var(--border-strong); }
+.hist-open {
+  flex: 1; min-width: 0; text-align: left; cursor: pointer; border: 0; background: transparent; color: var(--ink);
+  font: 500 15px/1.4 var(--font); padding: 12px 4px 12px 16px; border-radius: 16px;
+}
+.hist-q { display: block; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 6px; font-size: 0.82rem; color: var(--muted); }
+.hist-meta .tag { font-size: 0.72rem; }
+.hist-meta .pick { color: var(--ink); }
+.hist-del {
+  flex: none; width: 40px; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+  display: grid; place-items: center; border-radius: 0 16px 16px 0; transition: color 0.15s, background 0.15s;
+}
+.hist-del:hover { color: var(--ink); background: var(--hover); }
+.hist-del .icon { width: 16px; height: 16px; }
+#hist-empty { margin: 4px 2px; }
+
 .footer { color: var(--muted); font-size: 0.85rem; padding: 26px 4px 0; }
 
 /* status pill */
@@ -273,10 +299,14 @@ pre.prompt {
   .ask .btn span { display: none; }
   .funnel li { grid-template-columns: minmax(0, 1fr) 30px 70px; }
   .catalog-specs { display: none; }
+  .catalog-bar { flex-wrap: wrap; }
+  .hist-q { white-space: normal; }
   .token-bars { grid-template-columns: 80px minmax(0, 1fr) 60px; }
 }
 @media (max-width: 400px) {
   .stage-pill .seg-num { display: none; }
+  .wordmark span { display: none; }
+  .nav-pill .seg-item { padding: 10px 11px; }
 }
 
 section, h2, .trace-block { scroll-margin-top: 96px; }

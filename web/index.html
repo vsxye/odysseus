@@ -24,6 +24,10 @@
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         <span class="seg-label">Catalog</span>
       </button>
+      <button class="seg-item" role="tab" id="tab-history" data-view="history" aria-selected="false" aria-controls="view-history">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+        <span class="seg-label">History</span>
+      </button>
     </nav>
 
     <button class="icon-btn" id="settings-btn" type="button" aria-label="LLM settings" aria-expanded="false" aria-controls="settings">
@@ -76,6 +80,10 @@
           <span class="eyebrow">Assignment test queries</span>
           <div id="chips" class="options"></div>
         </div>
+        <div class="samples" id="recent-wrap" hidden>
+          <span class="eyebrow">Recent</span>
+          <div id="recent" class="options"></div>
+        </div>
       </div>
 
       <div class="grid">
@@ -106,6 +114,20 @@
             <tbody></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <!-- ============ History view ============ -->
+    <section id="view-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <div class="card glass arrive">
+        <div class="catalog-bar">
+          <h2>History</h2>
+          <span id="hist-count" class="muted"></span>
+          <button type="button" id="hist-clear" class="btn ghost small">Clear history</button>
+        </div>
+        <p class="help">Answered questions are saved in this browser only (last 50). Opening one restores the saved answer and re-runs the pipeline trace without calling the LLM again.</p>
+        <ul id="hist-list" class="hist-list"></ul>
+        <p id="hist-empty" class="muted" hidden>No history yet. Ask a question in the Assistant view and it will show up here.</p>
       </div>
     </section>
 

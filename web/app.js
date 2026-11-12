@@ -96,6 +96,7 @@
     });
     moveSlider($('nav'));
     if (name === 'assistant') moveSlider($('stages'));
+    if (name === 'history') renderHistory(); // refresh relative times
   }
   $('nav').addEventListener('click', function (e) {
     var b = e.target.closest('.seg-item');
@@ -284,6 +285,95 @@
     } catch (e) { /* ignore */ }
   }
 
+  // ------------------------------------------------------------ history (localStorage, newest first)
+  var HISTORY_KEY = 'techmart.history.v1';
+  var HISTORY_MAX = 50;
+  var memHistory = []; // fallback when storage is blocked
+
+  function loadHistory() {
+    try {
+      var raw = window.localStorage.getItem(HISTORY_KEY);
+      if (raw) {
+        var arr = JSON.parse(raw);
+        if (Array.isArray(arr)) { memHistory = arr; return arr; }
+      }
+    } catch (e) { /* storage blocked or corrupt */ }
+    return memHistory;
+  }
+  function saveHistory(list) {
+    memHistory = list.slice(0, HISTORY_MAX);
+    try { window.localStorage.setItem(HISTORY_KEY, JSON.stringify(memHistory)); } catch (e) { /* ignore */ }
+  }
+  function addHistory(r, answer, source, note) {
+    var top = r.retrieval && r.retrieval.results && r.retrieval.results[0] ? r.retrieval.results[0].product : null;
+    var entry = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      question: r.question,
+      stage: r.stage,
+      timestamp: Date.now(),
+      source: source,
+      top_pick: top ? { name: top.name, price: top.price } : null,
+      answer: answer,
+      note: note || ''
+    };
+    // drop older duplicates of the same question + stage so the list stays useful
+    var list = loadHistory().filter(function (h) { return !(h.question === entry.question && h.stage === entry.stage); });
+    list.unshift(entry);
+    saveHistory(list);
+    renderHistory();
+  }
+  function deleteHistory(id) {
+    saveHistory(loadHistory().filter(function (h) { return h.id !== id; }));
+    renderHistory();
+  }
+  function relTime(ts) {
+    var s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (s < 45) return 'just now';
+    var m = Math.round(s / 60);
+    if (m < 60) return m + ' min ago';
+    var h = Math.round(m / 60);
+    if (h < 24) return h + ' h ago';
+    var d = Math.round(h / 24);
+    if (d < 30) return d + (d === 1 ? ' day ago' : ' days ago');
+    return new Date(ts).toLocaleDateString('en-IN');
+  }
+  var TRASH_SVG = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>';
+  function renderHistory() {
+    var list = loadHistory();
+    $('hist-count').textContent = list.length ? list.length + (list.length === 1 ? ' question' : ' questions') : '';
+    $('hist-clear').hidden = !list.length;
+    $('hist-empty').hidden = !!list.length;
+    $('hist-list').innerHTML = list.map(function (h, i) {
+      var pick = h.top_pick ? '<span class="pick">' + esc(h.top_pick.name) + ' · ' + esc(E.inr(h.top_pick.price)) + '</span>' : '';
+      return '<li class="hist-row" style="animation-delay:' + Math.min(i, 12) * 25 + 'ms">' +
+        '<button type="button" class="hist-open" data-id="' + esc(h.id) + '">' +
+        '<span class="hist-q">' + esc(h.question) + '</span>' +
+        '<span class="hist-meta"><span class="tag">Stage ' + esc(h.stage) + '</span><span>' + esc(h.source) + '</span>' +
+        '<span>' + esc(relTime(h.timestamp)) + '</span>' + pick + '</span></button>' +
+        '<button type="button" class="hist-del" data-del="' + esc(h.id) + '" aria-label="Delete from history">' + TRASH_SVG + '</button></li>';
+    }).join('');
+    var recent = list.slice(0, 3);
+    $('recent-wrap').hidden = !recent.length;
+    $('recent').innerHTML = recent.map(function (h) {
+      return '<button type="button" class="option" data-id="' + esc(h.id) + '" aria-pressed="false"><span class="badge">S' + esc(h.stage) + '</span>' + esc(h.question) + '</button>';
+    }).join('');
+  }
+  // Restore a saved entry: deterministic trace re-run, saved answer + badge, no LLM call.
+  function restoreHistory(id) {
+    var h = loadHistory().filter(function (x) { return x.id === id; })[0];
+    if (!h || !products || busy) return;
+    showTab('assistant');
+    setStage(Number(h.stage) || 3);
+    $('question').value = h.question;
+    Array.prototype.forEach.call($('chips').children, function (c, i) {
+      c.setAttribute('aria-pressed', String(SAMPLES[i].q === h.question && SAMPLES[i].stage === stage));
+    });
+    renderTrace(E.run(h.question, products, { stage: stage, k: 5 }));
+    updateUrl(h.question);
+    setAnswer(h.answer, h.source + ' · saved ' + relTime(h.timestamp), h.note || null);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
   // ------------------------------------------------------------ server LLM (scripts/serve.py)
   var serverLLM = null; // { model } when /api/health reports ok
   var statusBase = '';
@@ -332,6 +422,7 @@
     var model = $('model').value.trim() || E.DEFAULT_MODEL;
     if (!key && !serverLLM) {
       setAnswer(r.offline_answer, 'offline template', null);
+      addHistory(r, r.offline_answer, 'offline template', null);
       return;
     }
     var waitingFor = key ? model : serverLLM.model + ' (local)';
@@ -344,12 +435,17 @@
       ? E.callAnthropic(r.prompt, key, model).then(function (res) {
           var usage = res.usage ? ' · ' + res.usage.input_tokens + ' in / ' + res.usage.output_tokens + ' out' : '';
           setAnswer(res.text, (res.model || model) + usage, null);
+          addHistory(r, res.text, res.model || model, null);
         })
       : callServerLLM(r.prompt).then(function (res) {
-          setAnswer(res.text, (res.provider === 'gemini' ? 'Gemini · ' : 'local LLM · ') + (res.model || serverLLM.model), null);
+          var src = (res.provider === 'gemini' ? 'Gemini · ' : 'local LLM · ') + (res.model || serverLLM.model);
+          setAnswer(res.text, src, null);
+          addHistory(r, res.text, src, null);
         });
     call.catch(function (err) {
-      setAnswer(r.offline_answer, 'offline template', (key ? 'LLM' : 'Local LLM') + ' call failed, so this is the offline answer. ' + (err && err.message ? err.message : String(err)));
+      var note = (key ? 'LLM' : 'Local LLM') + ' call failed, so this is the offline answer. ' + (err && err.message ? err.message : String(err));
+      setAnswer(r.offline_answer, 'offline template', note);
+      addHistory(r, r.offline_answer, 'offline template', note);
     }).then(function () {
       busy = false;
       $('ask-btn').disabled = false;
@@ -373,6 +469,23 @@
     });
     $('ask-form').addEventListener('submit', function (e) { e.preventDefault(); ask($('question').value); });
 
+    $('recent').addEventListener('click', function (e) {
+      var b = e.target.closest('.option');
+      if (b) restoreHistory(b.getAttribute('data-id'));
+    });
+    $('hist-list').addEventListener('click', function (e) {
+      var del = e.target.closest('.hist-del');
+      if (del) { deleteHistory(del.getAttribute('data-del')); return; }
+      var open = e.target.closest('.hist-open');
+      if (open) restoreHistory(open.getAttribute('data-id'));
+    });
+    $('hist-clear').addEventListener('click', function () {
+      if (!window.confirm('Clear all saved questions from history?')) return;
+      saveHistory([]);
+      renderHistory();
+    });
+    renderHistory();
+
     $('api-key').value = store(KEY_STORE);
     $('model').value = store(MODEL_STORE) || E.DEFAULT_MODEL;
     $('api-key').addEventListener('input', function () { store(KEY_STORE, $('api-key').value.trim()); });
@@ -382,7 +495,8 @@
     var params = new URLSearchParams(window.location.search);
     var st = Number(params.get('stage'));
     setStage(st >= 1 && st <= 3 ? st : 3);
-    showTab(params.get('tab') === 'catalog' ? 'catalog' : 'assistant');
+    var tab0 = params.get('tab');
+    showTab(tab0 === 'catalog' || tab0 === 'history' ? tab0 : 'assistant');
     var q0 = params.get('q');
     var healthReady = checkServerLLM();
 

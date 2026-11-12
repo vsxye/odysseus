@@ -57,9 +57,17 @@ GEMINI_API_KEYS=key1,key2
 GEMINI_MODEL=gemini-flash-lite-latest,gemini-3.5-flash
 ```
 
-`GEMINI_MODEL` is optional (default: `gemini-flash-lite-latest`, then `gemini-3.5-flash`; comma-separated, tried in order). You can list several keys separated by commas.
-If one key hits a rate limit or an error (429, 403 or 5xx), the server moves on to the next key. Restart
-`run.bat` after creating the file. Never commit `.env` to git. It is already in `.gitignore`.
+- `GEMINI_API_KEYS` is a comma-separated list of keys. A single `GEMINI_API_KEY` is also accepted.
+- `GEMINI_MODEL` is optional. The default is `gemini-flash-lite-latest,gemini-3.5-flash`. The models are tried in
+  that order.
+- For each request, the server tries the next key on any error: an HTTP error, a timeout (12 seconds) or an empty
+  answer. If every key and model fails, it falls back to the local Ollama model `qwen2.5:3b`. If that also fails,
+  the page uses the offline template answer.
+- The keys were tested before use, and only working keys are kept in `.env`. Google retires older models for new
+  keys. For example, `gemini-2.5-flash` returned 404 "no longer available to new users". That is why the default
+  uses the `-latest` alias.
+
+Restart `run.bat` after creating the file. Never commit `.env` to git. It is already in `.gitignore`.
 
 ### Command line: `ask.bat`
 
@@ -110,8 +118,8 @@ local Ollama), so share it only with people you trust.
 | Stage 2: wireless headphones under ₹10,000 with good battery | Stage 2: "What laptops do you have for students?" |
 | ![Stage 3: video editing under ₹70,000](docs/screenshots/05_stage3_video_editing.png) | ![Catalog browser](docs/screenshots/06_catalog_browser.png) |
 | Stage 3: best laptop for video editing under ₹70,000, with the parsed query and ranking shown | The catalog browser with all 50 products |
-| ![Mobile view](docs/screenshots/07_mobile_stage3.png) | |
-| The Stage 3 answer on a phone screen | |
+| ![Mobile view](docs/screenshots/07_mobile_stage3.png) | ![History view](docs/screenshots/08_history.png) |
+| The Stage 3 answer on a phone screen | History view: past questions, click to restore |
 
 ## The assignment in brief
 
@@ -294,6 +302,17 @@ reason + runner-up + excluded), and a list.
 - The output is the same every time, so tests can check exact facts.
 - If the API call fails (no key, network error, rate limit), the assistant still answers instead of crashing.
 - It proves that the retrieval and ranking are correct on their own. The LLM only words the answer.
+
+### History (web demo)
+
+Every answered question is saved in your browser (`localStorage`). It keeps the last 50, newest first. History is
+never sent anywhere.
+
+- The **History** tab lists each question with its stage, the model that answered, the time and the top pick.
+- Click an entry to restore it. The page shows the saved answer and recomputes the pipeline trace. It does not
+  call the LLM again. Why: this is free, instant, and uses no extra API quota.
+- You can delete one entry or clear all of them.
+- **Recent** chips under the sample questions let you reopen your latest questions in one click.
 
 ## Stage-by-stage walkthrough
 
@@ -590,3 +609,15 @@ The shape of the pipeline stays the same: parse, filter, rank, prompt, answer. W
   questions and expected rankings, run against both, would catch this.
 - **No check of the LLM output.** The prompt forbids invented facts, but nothing verifies the reply yet. Next step:
   check every product name and price in the answer against the catalog.
+
+## Changelog
+
+What was built, in order:
+
+1. Product catalog, Python pipeline and tests.
+2. Static web demo.
+3. GEOai-style user interface.
+4. Local LLM bridge (Ollama) and Cloudflare tunnel.
+5. One-click `run.bat` launcher.
+6. Gemini backend with key rotation.
+7. Question history.
