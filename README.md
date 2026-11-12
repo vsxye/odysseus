@@ -8,12 +8,13 @@ line tool and tests, and a static web demo that runs fully in the browser.
 
 ## Live demo
 
-**https://vsxye.github.io/odysseus/**
+**https://cet-informal-tattoo-jackets.trycloudflare.com/web/**
 
-- It works without an API key. In that case it uses the "offline" answer mode: the answer is built from a
-  fixed template filled with the ranked products. No LLM is called.
-- To get real LLM answers, paste your own Anthropic API key into the page. The key stays in your browser. It is
-  sent only to `api.anthropic.com`, and it is not saved on any server.
+- This link is a Cloudflare tunnel to a laptop running `run.bat` / `scripts/serve.py`. It works only while that
+  laptop, the server and the tunnel are running, and the address changes if the tunnel is restarted.
+- Answers come from Gemini (keys kept on the server, never sent to the browser), with local Ollama and then the
+  offline template as fallbacks. See "Answer sources" below.
+- To run your own copy, see "Run it on your own laptop (one click)" below.
 
 ## Run it on your own laptop (one click)
 
@@ -157,7 +158,7 @@ Build a product Q&A assistant for TechMart. Answers must come only from the cata
 ```
 
 The same pipeline exists twice: in Python (`assistant/`) and in JavaScript (`web/engine.js`), so the web demo
-can run on GitHub Pages with no server.
+can run as plain static files with no server.
 
 ### Step 1: Parse the question (`assistant/query_parser.py`)
 
@@ -476,7 +477,7 @@ ask.bat                   command line version, uses the .venv that run.bat crea
 .env                      your Gemini keys (optional, you create it; gitignored, never committed)
 requirements.txt          Python dependencies (anthropic, pytest)
 pyproject.toml            package metadata and pytest settings
-.nojekyll                 tells GitHub Pages to serve the files as they are
+.nojekyll                 lets the files be served as-is by static hosts
 ```
 
 ## Run it locally
@@ -546,7 +547,7 @@ questions right, and each step can be checked on its own in the trace.
 
 **Other trade-offs:**
 
-- **Two implementations (Python + JavaScript).** The web demo must run on GitHub Pages with no server, so the engine
+- **Two implementations (Python + JavaScript).** The web demo must also work as plain static files with no server, so the engine
   is ported to JavaScript. The cost is keeping two copies in sync. Both follow `docs/SPEC.md` and pick the same
   top product for all five test questions. There are small differences: the web engine applies the use-case
   profile in Stage 2 too (so its Stage 2 student answer already puts the Arcwave Campus 14 first), it has a few

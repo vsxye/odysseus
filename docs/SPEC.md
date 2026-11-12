@@ -23,12 +23,12 @@ assistant/                # Python package
   assistant.py            # answer(question, stage=1|2|3) orchestrator, returns dict with trace
   cli.py                  # `python -m assistant "question"` ; flags --stage --offline --k --json
 tests/                    # pytest, no network (offline mode)
-web/                      # static live demo (GitHub Pages, no build step)
+web/                      # static live demo (static, no build step)
   index.html, styles.css, app.js, engine.js
 index.html (root)         # redirects to web/
 ```
 
-GitHub Pages serves repo root, so web fetches `../data/products.json`.
+The server serves the repo root, so web fetches `../data/products.json`.
 
 ## Product schema (data/products.json = JSON array)
 
