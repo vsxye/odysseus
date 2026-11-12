@@ -25,6 +25,79 @@ SMALL_MODEL_HINT = (
 LLM_LOCK = threading.Lock()  # one generation at a time on a laptop
 
 
+def _load_dotenv():
+    """Read KEY=VALUE lines from a gitignored .env at the repo root."""
+    path = os.path.join(ROOT, ".env")
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+GEMINI_KEYS = [k.strip() for k in os.environ.get("GEMINI_API_KEYS", os.environ.get("GEMINI_API_KEY", "")).split(",") if k.strip()]
+GEMINI_MODELS = [m.strip() for m in os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest,gemini-3.5-flash").split(",") if m.strip()]
+_key_idx = [0]
+_key_lock = threading.Lock()
+
+
+def gemini_generate(system, user):
+    """Call Gemini, rotating keys/models on quota, auth or server errors.
+    Keys stay on this server; the browser never sees them."""
+    body = json.dumps({
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": user}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 600},
+    }).encode()
+    last = "no keys"
+    for model in GEMINI_MODELS:
+        for _ in range(len(GEMINI_KEYS)):
+            with _key_lock:
+                key = GEMINI_KEYS[_key_idx[0] % len(GEMINI_KEYS)]
+            url = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent" % model
+            req = urllib.request.Request(url, data=body, headers={
+                "Content-Type": "application/json", "x-goog-api-key": key})
+            try:
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    out = json.load(r)
+                text = "".join(p.get("text", "") for p in out["candidates"][0]["content"]["parts"])
+                if text.strip():
+                    return text, model
+                last = "empty response"
+            except urllib.error.HTTPError as e:
+                last = "HTTP %d" % e.code
+            except Exception as e:  # timeout / network
+                last = type(e).__name__
+            with _key_lock:
+                _key_idx[0] += 1  # try the next key
+    raise RuntimeError("Gemini failed (%s)" % last)
+
+
+def ollama_generate(system, user):
+    payload = {
+        "model": MODEL, "stream": False,
+        "options": {"temperature": 0.2, "num_predict": 400},
+        "messages": [{"role": "system", "content": system + SMALL_MODEL_HINT},
+                     {"role": "user", "content": user}],
+    }
+    r = urllib.request.Request(OLLAMA + "/api/chat", data=json.dumps(payload).encode(),
+                               headers={"Content-Type": "application/json"})
+    with LLM_LOCK, urllib.request.urlopen(r, timeout=120) as resp:
+        return json.load(resp)["message"]["content"], MODEL
+
+
+def ollama_ok():
+    try:
+        with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=3) as r:
+            return MODEL in [m["name"] for m in json.load(r).get("models", [])]
+    except Exception:
+        return False
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     # Windows sometimes maps .js to text/plain in the registry; pin the types.
     extensions_map = {
@@ -48,13 +121,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?")[0] == "/api/health":
-            try:
-                with urllib.request.urlopen(OLLAMA + "/api/tags", timeout=3) as r:
-                    names = [m["name"] for m in json.load(r).get("models", [])]
-                ok = MODEL in names
-                return self._json(200 if ok else 503, {"ok": ok, "model": MODEL})
-            except Exception as e:  # Ollama not running
-                return self._json(503, {"ok": False, "model": MODEL, "error": str(e)})
+            if GEMINI_KEYS:
+                return self._json(200, {"ok": True, "provider": "gemini", "model": GEMINI_MODELS[0]})
+            ok = ollama_ok()
+            return self._json(200 if ok else 503, {"ok": ok, "provider": "ollama", "model": MODEL})
         return super().do_GET()
 
     def do_POST(self):
@@ -65,23 +135,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if n > 200_000:
                 return self._json(413, {"error": "prompt too large"})
             req = json.loads(self.rfile.read(n) or b"{}")
-            payload = {
-                "model": MODEL,
-                "stream": False,
-                "options": {"temperature": 0.2, "num_predict": 400},
-                "messages": [
-                    {"role": "system", "content": str(req.get("system", "")) + SMALL_MODEL_HINT},
-                    {"role": "user", "content": str(req.get("user", ""))},
-                ],
-            }
-            r = urllib.request.Request(
-                OLLAMA + "/api/chat", data=json.dumps(payload).encode(),
-                headers={"Content-Type": "application/json"})
-            with LLM_LOCK, urllib.request.urlopen(r, timeout=120) as resp:
-                out = json.load(resp)
-            return self._json(200, {"text": out["message"]["content"], "model": MODEL})
+            system, user = str(req.get("system", "")), str(req.get("user", ""))
         except Exception as e:
-            return self._json(500, {"error": str(e)})
+            return self._json(400, {"error": "bad request: %s" % e})
+        errors = []
+        if GEMINI_KEYS:
+            try:
+                text, model = gemini_generate(system, user)
+                return self._json(200, {"text": text, "model": model, "provider": "gemini"})
+            except Exception as e:
+                errors.append(str(e))
+        try:
+            text, model = ollama_generate(system, user)
+            return self._json(200, {"text": text, "model": model, "provider": "ollama"})
+        except Exception as e:
+            errors.append("Ollama: %s" % e)
+        return self._json(503, {"error": "; ".join(errors)})
 
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")

@@ -15,6 +15,91 @@ line tool and tests, and a static web demo that runs fully in the browser.
 - To get real LLM answers, paste your own Anthropic API key into the page. The key stays in your browser. It is
   sent only to `api.anthropic.com`, and it is not saved on any server.
 
+## Run it on your own laptop (one click)
+
+This works on Windows. You do not need to install Python or anything else first.
+
+1. On the GitHub page, click **Code**, then **Download ZIP**.
+2. Extract the ZIP to any folder (right-click, **Extract All**).
+3. Open the folder and double-click **`run.bat`**.
+
+The first run takes a few minutes because it downloads what it needs. Later runs start in a few seconds.
+
+Windows SmartScreen may warn you because the `.bat` file came from the internet. Click **More info**, then
+**Run anyway**.
+
+### What `run.bat` does, and why
+
+1. **Downloads a portable Python 3.12** (about 15 MB, from NuGet) into a `.runtime\` folder inside the project.
+   Why: it never touches any Python you already have. It does not change your PATH or the registry, and it does
+   not run an installer.
+2. **Creates an isolated virtual environment** in `.venv\`. Why: the project's packages stay inside this folder
+   and cannot clash with anything else on your PC.
+3. **Installs `requirements.txt`** into that environment. It only does this again if the file changes.
+4. **Installs Ollama and the `qwen2.5:3b` model** (about 2 GB). Ollama is a free, open-source program that runs
+   an LLM on your own laptop. It is installed for your user only. Why: you get real LLM answers with no API key
+   and no cost. If you do not want this, set `TECHMART_SKIP_LLM=1` before running `run.bat`. The app then uses
+   the offline rule-based answers.
+5. **Starts `scripts/serve.py`** on the first free port from 8000 and opens the demo in your browser.
+
+To stop it, close the black console window.
+
+**Uninstall:** delete the project folder. If you also want to remove Ollama, uninstall it from Windows
+**Settings > Apps**.
+
+### Optional: faster answers with Gemini
+
+The local model is free but can be slow on an older laptop. For faster answers, create a file called `.env` in
+the project folder (next to `run.bat`) with your Google Gemini API key(s):
+
+```
+GEMINI_API_KEYS=key1,key2
+GEMINI_MODEL=gemini-flash-lite-latest,gemini-3.5-flash
+```
+
+`GEMINI_MODEL` is optional (default: `gemini-flash-lite-latest`, then `gemini-3.5-flash`; comma-separated, tried in order). You can list several keys separated by commas.
+If one key hits a rate limit or an error (429, 403 or 5xx), the server moves on to the next key. Restart
+`run.bat` after creating the file. Never commit `.env` to git. It is already in `.gitignore`.
+
+### Command line: `ask.bat`
+
+After `run.bat` has run once, you can also use the command line version:
+
+```
+ask.bat                                                  runs the five assignment questions
+ask.bat "Which earbuds have the longest battery life?"   answers one question
+```
+
+For real LLM answers on the command line, run `set ANTHROPIC_API_KEY=sk-ant-...` in the same window first.
+
+## Answer sources
+
+When you ask a question in the web demo, the answer comes from the first of these that is available:
+
+1. **Your Anthropic API key**, if you paste one into the page. The browser calls Anthropic directly.
+2. **The server's LLM**, when the page is served by `scripts/serve.py`. This is Google Gemini if `.env` has
+   `GEMINI_API_KEYS`, otherwise the local Ollama model `qwen2.5:3b`. The keys stay on the server. The browser
+   never sees them; it only calls `/api/llm` on the local server. `/api/health` shows which provider and model
+   are in use.
+3. **The offline rule-based answer**, if no LLM is available. It is built from a template filled with the ranked
+   products.
+
+The product search and ranking are the same in all three cases. Only the final wording changes.
+
+## Sharing it from your laptop with Cloudflare
+
+To let someone else try the demo running on your laptop, install
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and run:
+
+```
+cloudflared tunnel --url http://localhost:8000
+```
+
+It prints a temporary `https://<random-name>.trycloudflare.com` link. Add `/web/` to the end and share it. The link
+works only while your laptop is on and both `run.bat` and `cloudflared` are running. If `serve.py` picked a port
+other than 8000, use that port instead. Anyone with the link uses your server's LLM (your Gemini keys or your
+local Ollama), so share it only with people you trust.
+
 ## Screenshots
 
 | | |
@@ -365,6 +450,11 @@ docs/
   SPEC.md                 the shared design spec the code was built from
   sample_outputs.md       full output of `python -m assistant --demo --offline`
   screenshots/            screenshots used in this README
+scripts/
+  serve.py                local server for run.bat: serves the demo, /api/llm (Gemini or Ollama), /api/health
+run.bat                   one-click Windows launcher (portable Python, .venv, Ollama, starts serve.py)
+ask.bat                   command line version, uses the .venv that run.bat created
+.env                      your Gemini keys (optional, you create it; gitignored, never committed)
 requirements.txt          Python dependencies (anthropic, pytest)
 pyproject.toml            package metadata and pytest settings
 .nojekyll                 tells GitHub Pages to serve the files as they are

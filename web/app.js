@@ -346,7 +346,7 @@
           setAnswer(res.text, (res.model || model) + usage, null);
         })
       : callServerLLM(r.prompt).then(function (res) {
-          setAnswer(res.text, 'local LLM · ' + (res.model || serverLLM.model), null);
+          setAnswer(res.text, (res.provider === 'gemini' ? 'Gemini · ' : 'local LLM · ') + (res.model || serverLLM.model), null);
         });
     call.catch(function (err) {
       setAnswer(r.offline_answer, 'offline template', (key ? 'LLM' : 'Local LLM') + ' call failed, so this is the offline answer. ' + (err && err.message ? err.message : String(err)));
