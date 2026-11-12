@@ -1,0 +1,15 @@
+[project]
+name = "techmart-assistant"
+version = "0.1.0"
+description = "Catalog-grounded product Q&A assistant for TechMart (BM25 + structured filters + LLM)"
+requires-python = ">=3.10"
+dependencies = ["anthropic>=0.40"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["assistant"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

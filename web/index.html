@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TechMart Product Assistant</title>
+  <meta name="description" content="Catalog-grounded product Q&amp;A demo: query parsing, hard filters, BM25 + use-case spec scoring, and an LLM prompt built from only the retrieved products.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar glass">
+    <a class="wordmark" href="./" aria-label="TechMart Assistant home">TechMart <span>Assistant</span></a>
+
+    <nav class="seg nav-pill" id="nav" role="tablist" aria-label="View">
+      <span class="seg-slider" aria-hidden="true"></span>
+      <button class="seg-item" role="tab" id="tab-assistant" data-view="assistant" aria-selected="true" aria-controls="view-assistant">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        <span class="seg-label">Assistant</span>
+      </button>
+      <button class="seg-item" role="tab" id="tab-catalog" data-view="catalog" aria-selected="false" aria-controls="view-catalog">
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span class="seg-label">Catalog</span>
+      </button>
+    </nav>
+
+    <button class="icon-btn" id="settings-btn" type="button" aria-label="LLM settings" aria-expanded="false" aria-controls="settings">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </header>
+
+  <section id="settings" class="popover glass" hidden aria-label="LLM settings">
+    <h2>LLM settings <span class="muted">(optional)</span></h2>
+    <p class="help">Without a key, answers come from a deterministic offline template built from the ranked products.
+      With a key, this page calls the Anthropic Messages API directly from your browser. The key is stored only in this
+      tab's <code>sessionStorage</code> and is sent only to <code>api.anthropic.com</code>.</p>
+    <label class="field">Anthropic API key
+      <input id="api-key" type="password" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+    </label>
+    <label class="field">Model
+      <input id="model" type="text" spellcheck="false">
+    </label>
+    <div class="row-end">
+      <button type="button" id="clear-key" class="btn ghost">Clear key</button>
+      <button type="button" id="settings-done" class="btn">Done</button>
+    </div>
+  </section>
+
+  <main class="wrap">
+    <div id="load-error" class="notice error" hidden></div>
+
+    <!-- ============ Assistant view ============ -->
+    <section id="view-assistant" role="tabpanel" aria-labelledby="tab-assistant">
+      <div class="card glass arrive">
+        <div class="seg stage-pill" id="stages" role="radiogroup" aria-label="Stage">
+          <span class="seg-slider" aria-hidden="true"></span>
+          <button class="seg-item" role="radio" data-stage="1" aria-checked="false"><span class="seg-num">1</span><span class="seg-label">Full catalog</span></button>
+          <button class="seg-item" role="radio" data-stage="2" aria-checked="false"><span class="seg-num">2</span><span class="seg-label">Retrieval</span></button>
+          <button class="seg-item" role="radio" data-stage="3" aria-checked="true"><span class="seg-num">3</span><span class="seg-label">Reasoning</span></button>
+        </div>
+        <p id="stage-help" class="help"></p>
+
+        <form id="ask-form" class="ask" autocomplete="off">
+          <label for="question" class="sr-only">Question</label>
+          <input id="question" name="q" type="text" placeholder="Ask about any product, e.g. best laptop for video editing under ₹70,000" required>
+          <button type="submit" id="ask-btn" class="btn">
+            <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            <span>Ask</span>
+          </button>
+        </form>
+        <div class="loadbar" id="loadbar" aria-hidden="true"><i></i></div>
+
+        <div class="samples">
+          <span class="eyebrow">Assignment test queries</span>
+          <div id="chips" class="options"></div>
+        </div>
+      </div>
+
+      <div class="grid">
+        <section class="card glass" aria-labelledby="answer-h">
+          <h2 id="answer-h">Answer <span id="answer-source" class="tag"></span></h2>
+          <div id="answer" class="answer"><p class="muted">Ask a question or pick a test query above.</p></div>
+          <div id="answer-note" class="notice" hidden></div>
+        </section>
+
+        <section class="card glass" aria-labelledby="trace-h">
+          <h2 id="trace-h">Pipeline trace</h2>
+          <div id="trace"><p class="muted">The query plan, filter funnel, retrieved products and the exact prompt appear here.</p></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ============ Catalog view ============ -->
+    <section id="view-catalog" role="tabpanel" aria-labelledby="tab-catalog" hidden>
+      <div class="card glass arrive">
+        <div class="catalog-bar">
+          <h2>Catalog</h2>
+          <span id="cat-count" class="muted"></span>
+        </div>
+        <div id="cat-filter" class="options" role="group" aria-label="Filter by category"></div>
+        <div class="table-wrap">
+          <table class="table" id="catalog-table">
+            <thead><tr><th>ID</th><th>Product</th><th>Category</th><th class="num">Price</th><th class="catalog-specs">Specs</th><th>Stock</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      Rule-based query parsing → hard filters (category, price, wireless/ANC) with relaxation → BM25 (k1=1.5, b=0.75) +
+      use-case spec scoring (0.6 spec + 0.4 BM25) → top-k context. Same design as the Python package in <code>assistant/</code>.
+    </footer>
+  </main>
+
+  <div class="status glass" id="status"><span class="dot" aria-hidden="true"></span><span id="status-text">Loading catalog…</span></div>
+
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

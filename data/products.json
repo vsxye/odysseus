@@ -1,0 +1,926 @@
+[
+  {
+    "id": "P01",
+    "name": "NovaBook Air 14",
+    "brand": "Nova",
+    "category": "Laptop",
+    "price": 52000,
+    "specs": "8GB RAM, Intel i5, 512GB SSD, 10hr battery",
+    "description": "A thin and light everyday laptop for work, browsing and study.",
+    "attributes": {
+      "ram_gb": 8,
+      "cpu": "Intel i5",
+      "storage_gb": 512,
+      "gpu": null,
+      "gpu_tier": 0,
+      "battery_hr": 10,
+      "display_in": 14,
+      "weight_kg": 1.3,
+      "refresh_hz": 60
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P02",
+    "name": "NovaBook Pro 15",
+    "brand": "Nova",
+    "category": "Laptop",
+    "price": 78000,
+    "specs": "16GB RAM, Intel i7, 1TB SSD, RTX 3050, 8hr battery",
+    "description": "A powerful 15-inch performance laptop for professionals and creators.",
+    "attributes": {
+      "ram_gb": 16,
+      "cpu": "Intel i7",
+      "storage_gb": 1024,
+      "gpu": "RTX 3050",
+      "gpu_tier": 1,
+      "battery_hr": 8,
+      "display_in": 15.6,
+      "weight_kg": 1.8,
+      "refresh_hz": 144
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P03",
+    "name": "SoundCore X40",
+    "brand": "SoundCore",
+    "category": "Earbuds",
+    "price": 3500,
+    "specs": "30hr battery, ANC, IP54 water resistant",
+    "description": "True wireless earbuds with active noise cancellation and all-day battery.",
+    "attributes": {
+      "battery_hr": 30,
+      "anc": true,
+      "water_resistance": "IP54",
+      "wireless": true,
+      "driver_mm": 10
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P04",
+    "name": "SoundCore Studio Pro",
+    "brand": "SoundCore",
+    "category": "Headset",
+    "price": 8200,
+    "specs": "50hr battery, studio-grade ANC, foldable",
+    "description": "Over-ear wireless headphones with studio-grade noise cancellation and a foldable design.",
+    "attributes": {
+      "battery_hr": 50,
+      "anc": true,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 40,
+      "weight_kg": 0.26
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P05",
+    "name": "Zentra Vision 15",
+    "brand": "Zentra",
+    "category": "Laptop",
+    "price": 68990,
+    "specs": "16GB RAM, AMD Ryzen 7, 512GB SSD, RTX 4050, 144Hz display, 7hr battery",
+    "description": "A creator-ready laptop with a dedicated RTX 4050 GPU for editing, rendering and gaming.",
+    "attributes": {
+      "ram_gb": 16,
+      "cpu": "AMD Ryzen 7",
+      "storage_gb": 512,
+      "gpu": "RTX 4050",
+      "gpu_tier": 2,
+      "battery_hr": 7,
+      "display_in": 15.6,
+      "weight_kg": 1.9,
+      "refresh_hz": 144
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P06",
+    "name": "Pixelon Slim 14",
+    "brand": "Pixelon",
+    "category": "Laptop",
+    "price": 61000,
+    "specs": "16GB RAM, Intel i5, 512GB SSD, Intel Iris Xe graphics, 12hr battery",
+    "description": "A sleek aluminium ultrabook with plenty of memory for multitasking.",
+    "attributes": {
+      "ram_gb": 16,
+      "cpu": "Intel i5",
+      "storage_gb": 512,
+      "gpu": null,
+      "gpu_tier": 0,
+      "battery_hr": 12,
+      "display_in": 14,
+      "weight_kg": 1.25,
+      "refresh_hz": 60
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P07",
+    "name": "Lumio StreamBook 15",
+    "brand": "Lumio",
+    "category": "Laptop",
+    "price": 45990,
+    "specs": "8GB RAM, Intel i3, 256GB SSD, Full HD display, 9hr battery",
+    "description": "A big-screen home laptop that is great for watching videos and streaming movies.",
+    "attributes": {
+      "ram_gb": 8,
+      "cpu": "Intel i3",
+      "storage_gb": 256,
+      "gpu": null,
+      "gpu_tier": 0,
+      "battery_hr": 9,
+      "display_in": 15.6,
+      "weight_kg": 1.7,
+      "refresh_hz": 60
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P08",
+    "name": "Arcwave Campus 14",
+    "brand": "Arcwave",
+    "category": "Laptop",
+    "price": 33990,
+    "specs": "8GB RAM, AMD Ryzen 3, 256GB SSD, 14hr battery, 1.2kg",
+    "description": "An affordable, featherweight laptop built for students with all-day battery life.",
+    "attributes": {
+      "ram_gb": 8,
+      "cpu": "AMD Ryzen 3",
+      "storage_gb": 256,
+      "gpu": null,
+      "gpu_tier": 0,
+      "battery_hr": 14,
+      "display_in": 14,
+      "weight_kg": 1.2,
+      "refresh_hz": 60
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P09",
+    "name": "Pixelon Blaze 15",
+    "brand": "Pixelon",
+    "category": "Laptop",
+    "price": 89990,
+    "specs": "16GB RAM, Intel i7, 1TB SSD, RTX 4060, 165Hz display, 6hr battery",
+    "description": "A high-refresh gaming laptop that handles AAA titles with ease.",
+    "attributes": {
+      "ram_gb": 16,
+      "cpu": "Intel i7",
+      "storage_gb": 1024,
+      "gpu": "RTX 4060",
+      "gpu_tier": 2,
+      "battery_hr": 6,
+      "display_in": 15.6,
+      "weight_kg": 2.2,
+      "refresh_hz": 165
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P10",
+    "name": "Zentra Studio X 16",
+    "brand": "Zentra",
+    "category": "Laptop",
+    "price": 124990,
+    "specs": "32GB RAM, AMD Ryzen 9, 1TB SSD, RTX 4070, 16-inch 2.5K display, 8hr battery",
+    "description": "A flagship creator laptop for 4K video editing, 3D rendering and colour grading.",
+    "attributes": {
+      "ram_gb": 32,
+      "cpu": "AMD Ryzen 9",
+      "storage_gb": 1024,
+      "gpu": "RTX 4070",
+      "gpu_tier": 3,
+      "battery_hr": 8,
+      "display_in": 16,
+      "weight_kg": 2.1,
+      "refresh_hz": 165
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P11",
+    "name": "Vertex Forge 16",
+    "brand": "Vertex",
+    "category": "Laptop",
+    "price": 159990,
+    "specs": "32GB RAM, Intel i9, 2TB SSD, RTX 4080, 240Hz display, 5hr battery",
+    "description": "An uncompromising desktop-replacement for hardcore gaming and heavy workloads.",
+    "attributes": {
+      "ram_gb": 32,
+      "cpu": "Intel i9",
+      "storage_gb": 2048,
+      "gpu": "RTX 4080",
+      "gpu_tier": 3,
+      "battery_hr": 5,
+      "display_in": 16,
+      "weight_kg": 2.6,
+      "refresh_hz": 240
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P12",
+    "name": "SoundCore Lite 20",
+    "brand": "SoundCore",
+    "category": "Earbuds",
+    "price": 1499,
+    "specs": "20hr battery, IPX4 sweat resistant, Bluetooth 5.3",
+    "description": "Budget true wireless earbuds with punchy sound for everyday listening.",
+    "attributes": {
+      "battery_hr": 20,
+      "anc": false,
+      "water_resistance": "IPX4",
+      "wireless": true,
+      "driver_mm": 10
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P13",
+    "name": "Arcwave Pulse Sport",
+    "brand": "Arcwave",
+    "category": "Earbuds",
+    "price": 2999,
+    "specs": "28hr battery, IP67 waterproof, secure ear hooks",
+    "description": "Sweatproof sport earbuds with ear hooks that stay put during runs and workouts.",
+    "attributes": {
+      "battery_hr": 28,
+      "anc": false,
+      "water_resistance": "IP67",
+      "wireless": true,
+      "driver_mm": 12
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P14",
+    "name": "Lumio Buds Air",
+    "brand": "Lumio",
+    "category": "Earbuds",
+    "price": 4499,
+    "specs": "24hr battery, hybrid ANC, IPX4, wireless charging case",
+    "description": "Compact noise-cancelling earbuds with a pocketable wireless charging case.",
+    "attributes": {
+      "battery_hr": 24,
+      "anc": true,
+      "water_resistance": "IPX4",
+      "wireless": true,
+      "driver_mm": 11
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P15",
+    "name": "Zentra Echo Buds 2",
+    "brand": "Zentra",
+    "category": "Earbuds",
+    "price": 5999,
+    "specs": "36hr battery, adaptive ANC, IP55, multipoint pairing",
+    "description": "Long-lasting ANC earbuds with multipoint pairing for commuters.",
+    "attributes": {
+      "battery_hr": 36,
+      "anc": true,
+      "water_resistance": "IP55",
+      "wireless": true,
+      "driver_mm": 11
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P16",
+    "name": "Pixelon Tune Pro",
+    "brand": "Pixelon",
+    "category": "Earbuds",
+    "price": 7999,
+    "specs": "32hr battery, adaptive ANC, IPX5, LDAC hi-res audio",
+    "description": "Hi-res audio earbuds with adaptive noise cancellation and rich bass.",
+    "attributes": {
+      "battery_hr": 32,
+      "anc": true,
+      "water_resistance": "IPX5",
+      "wireless": true,
+      "driver_mm": 12
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P17",
+    "name": "Vertex Aura Elite",
+    "brand": "Vertex",
+    "category": "Earbuds",
+    "price": 12990,
+    "specs": "45hr battery, premium ANC, IP57, spatial audio",
+    "description": "Premium flagship earbuds with spatial audio and the longest battery in their class.",
+    "attributes": {
+      "battery_hr": 45,
+      "anc": true,
+      "water_resistance": "IP57",
+      "wireless": true,
+      "driver_mm": 11
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P18",
+    "name": "Nova Pods Max",
+    "brand": "Nova",
+    "category": "Earbuds",
+    "price": 15990,
+    "specs": "40hr battery, studio ANC, IPX4, lossless audio",
+    "description": "Luxury earbuds with lossless audio and industry-leading noise cancellation.",
+    "attributes": {
+      "battery_hr": 40,
+      "anc": true,
+      "water_resistance": "IPX4",
+      "wireless": true,
+      "driver_mm": 12
+    },
+    "in_stock": false
+  },
+  {
+    "id": "P19",
+    "name": "Arcwave Bass 300",
+    "brand": "Arcwave",
+    "category": "Headset",
+    "price": 2499,
+    "specs": "40hr battery, deep bass, foldable, Bluetooth 5.3",
+    "description": "Affordable on-ear wireless headphones with booming bass.",
+    "attributes": {
+      "battery_hr": 40,
+      "anc": false,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 40,
+      "weight_kg": 0.18
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P20",
+    "name": "Lumio Calm 500",
+    "brand": "Lumio",
+    "category": "Headset",
+    "price": 6499,
+    "specs": "45hr battery, hybrid ANC, plush ear cushions",
+    "description": "Comfortable over-ear ANC headphones for long work-from-home days.",
+    "attributes": {
+      "battery_hr": 45,
+      "anc": true,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 40,
+      "weight_kg": 0.25
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P21",
+    "name": "Zentra Voyage ANC",
+    "brand": "Zentra",
+    "category": "Headset",
+    "price": 9499,
+    "specs": "60hr battery, adaptive ANC, IPX4, fast charging",
+    "description": "Travel-friendly over-ear headphones with marathon battery and adaptive ANC.",
+    "attributes": {
+      "battery_hr": 60,
+      "anc": true,
+      "water_resistance": "IPX4",
+      "wireless": true,
+      "driver_mm": 40,
+      "weight_kg": 0.24
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P22",
+    "name": "Pixelon Arena X",
+    "brand": "Pixelon",
+    "category": "Headset",
+    "price": 7499,
+    "specs": "30hr battery, 7.1 surround, low-latency 2.4GHz, boom mic",
+    "description": "A wireless gaming headset with surround sound and a detachable boom mic.",
+    "attributes": {
+      "battery_hr": 30,
+      "anc": false,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 50,
+      "weight_kg": 0.32
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P23",
+    "name": "Vertex Sonic Infinity",
+    "brand": "Vertex",
+    "category": "Headset",
+    "price": 18990,
+    "specs": "80hr battery, flagship ANC, spatial audio, foldable",
+    "description": "Flagship over-ear headphones with class-leading 80-hour battery and spatial audio.",
+    "attributes": {
+      "battery_hr": 80,
+      "anc": true,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 40,
+      "weight_kg": 0.25
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P24",
+    "name": "Nova Phone 12",
+    "brand": "Nova",
+    "category": "Smartphone",
+    "price": 14999,
+    "specs": "6GB RAM, 128GB storage, 6.6-inch 90Hz display, 5000mAh battery, 50MP camera",
+    "description": "A dependable budget 5G phone with a big battery.",
+    "attributes": {
+      "ram_gb": 6,
+      "cpu": "Dimensity 6100",
+      "storage_gb": 128,
+      "battery_hr": 30,
+      "display_in": 6.6,
+      "refresh_hz": 90,
+      "weight_kg": 0.19
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P25",
+    "name": "Pixelon P8",
+    "brand": "Pixelon",
+    "category": "Smartphone",
+    "price": 24999,
+    "specs": "8GB RAM, 256GB storage, 6.7-inch 120Hz AMOLED, 5000mAh battery, 64MP camera",
+    "description": "A mid-range phone with a vibrant AMOLED display and fast charging.",
+    "attributes": {
+      "ram_gb": 8,
+      "cpu": "Snapdragon 7 Gen 3",
+      "storage_gb": 256,
+      "battery_hr": 32,
+      "display_in": 6.7,
+      "refresh_hz": 120,
+      "weight_kg": 0.18
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P26",
+    "name": "Zentra Z5 Pro",
+    "brand": "Zentra",
+    "category": "Smartphone",
+    "price": 39999,
+    "specs": "12GB RAM, 256GB storage, 6.7-inch 120Hz AMOLED, 4800mAh battery, 50MP OIS camera",
+    "description": "A flagship-killer with a powerful chip and stabilised camera.",
+    "attributes": {
+      "ram_gb": 12,
+      "cpu": "Snapdragon 8s Gen 3",
+      "storage_gb": 256,
+      "battery_hr": 28,
+      "display_in": 6.7,
+      "refresh_hz": 120,
+      "weight_kg": 0.2
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P27",
+    "name": "Arcwave Max 10",
+    "brand": "Arcwave",
+    "category": "Smartphone",
+    "price": 11999,
+    "specs": "4GB RAM, 64GB storage, 6.5-inch 90Hz display, 6000mAh battery",
+    "description": "An entry-level phone with a massive 6000mAh battery for two-day use.",
+    "attributes": {
+      "ram_gb": 4,
+      "cpu": "Helio G99",
+      "storage_gb": 64,
+      "battery_hr": 36,
+      "display_in": 6.5,
+      "refresh_hz": 90,
+      "weight_kg": 0.2
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P28",
+    "name": "Lumio Snap 9",
+    "brand": "Lumio",
+    "category": "Smartphone",
+    "price": 32999,
+    "specs": "8GB RAM, 256GB storage, 6.4-inch 120Hz AMOLED, 4500mAh battery, 108MP camera",
+    "description": "A compact camera-first phone with a 108MP sensor.",
+    "attributes": {
+      "ram_gb": 8,
+      "cpu": "Dimensity 8200",
+      "storage_gb": 256,
+      "battery_hr": 26,
+      "display_in": 6.4,
+      "refresh_hz": 120,
+      "weight_kg": 0.17
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P29",
+    "name": "Vertex Edge Ultra",
+    "brand": "Vertex",
+    "category": "Smartphone",
+    "price": 89999,
+    "specs": "16GB RAM, 512GB storage, 6.8-inch 120Hz LTPO, 5000mAh battery, 200MP camera",
+    "description": "An ultra-premium flagship with a 200MP camera and stylus support.",
+    "attributes": {
+      "ram_gb": 16,
+      "cpu": "Snapdragon 8 Gen 4",
+      "storage_gb": 512,
+      "battery_hr": 30,
+      "display_in": 6.8,
+      "refresh_hz": 120,
+      "weight_kg": 0.22
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P30",
+    "name": "Nova Phone 12 Pro",
+    "brand": "Nova",
+    "category": "Smartphone",
+    "price": 54999,
+    "specs": "12GB RAM, 256GB storage, 6.7-inch 120Hz AMOLED, 4900mAh battery, triple camera",
+    "description": "A premium phone with a versatile triple camera and sleek glass design.",
+    "attributes": {
+      "ram_gb": 12,
+      "cpu": "Snapdragon 8 Gen 3",
+      "storage_gb": 256,
+      "battery_hr": 29,
+      "display_in": 6.7,
+      "refresh_hz": 120,
+      "weight_kg": 0.2
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P31",
+    "name": "Nova Tab 11",
+    "brand": "Nova",
+    "category": "Tablet",
+    "price": 21999,
+    "specs": "6GB RAM, 128GB storage, 11-inch 90Hz display, 12hr battery",
+    "description": "A family tablet for streaming, reading and online classes.",
+    "attributes": {
+      "ram_gb": 6,
+      "cpu": "Snapdragon 685",
+      "storage_gb": 128,
+      "battery_hr": 12,
+      "display_in": 11,
+      "refresh_hz": 90,
+      "weight_kg": 0.48
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P32",
+    "name": "Pixelon Slate Pro 12",
+    "brand": "Pixelon",
+    "category": "Tablet",
+    "price": 64999,
+    "specs": "12GB RAM, M2 chip, 512GB storage, 12.4-inch 120Hz display, stylus support, 10hr battery",
+    "description": "A pro tablet with stylus support for digital art and note-taking.",
+    "attributes": {
+      "ram_gb": 12,
+      "cpu": "M-series M2",
+      "storage_gb": 512,
+      "battery_hr": 10,
+      "display_in": 12.4,
+      "refresh_hz": 120,
+      "weight_kg": 0.6
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P33",
+    "name": "Lumio Pad Mini",
+    "brand": "Lumio",
+    "category": "Tablet",
+    "price": 15999,
+    "specs": "4GB RAM, 64GB storage, 8.7-inch display, 13hr battery",
+    "description": "A compact, affordable tablet perfect for e-books and video calls.",
+    "attributes": {
+      "ram_gb": 4,
+      "cpu": "Helio G88",
+      "storage_gb": 64,
+      "battery_hr": 13,
+      "display_in": 8.7,
+      "refresh_hz": 60,
+      "weight_kg": 0.34
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P34",
+    "name": "Zentra Tab S9",
+    "brand": "Zentra",
+    "category": "Tablet",
+    "price": 42999,
+    "specs": "8GB RAM, 256GB storage, 11-inch 120Hz AMOLED, 14hr battery, IP68",
+    "description": "A premium AMOLED tablet with long battery and a water-resistant build.",
+    "attributes": {
+      "ram_gb": 8,
+      "cpu": "Snapdragon 8 Gen 2",
+      "storage_gb": 256,
+      "battery_hr": 14,
+      "display_in": 11,
+      "refresh_hz": 120,
+      "weight_kg": 0.5
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P35",
+    "name": "Arcwave Tab Go",
+    "brand": "Arcwave",
+    "category": "Tablet",
+    "price": 11499,
+    "specs": "3GB RAM, 32GB storage, 10.1-inch display, 10hr battery, kids mode",
+    "description": "A rugged starter tablet with parental controls for kids.",
+    "attributes": {
+      "ram_gb": 3,
+      "cpu": "Unisoc T606",
+      "storage_gb": 32,
+      "battery_hr": 10,
+      "display_in": 10.1,
+      "refresh_hz": 60,
+      "weight_kg": 0.45
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P36",
+    "name": "Nova Watch 3",
+    "brand": "Nova",
+    "category": "Smartwatch",
+    "price": 4999,
+    "specs": "7-day battery, 1.8-inch AMOLED, heart-rate & SpO2, IP68",
+    "description": "An everyday fitness smartwatch with a bright AMOLED screen.",
+    "attributes": {
+      "battery_hr": 168,
+      "gps": false,
+      "water_resistance": "IP68",
+      "display_in": 1.8,
+      "wireless": true,
+      "weight_kg": 0.04
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P37",
+    "name": "Arcwave Fit Run",
+    "brand": "Arcwave",
+    "category": "Smartwatch",
+    "price": 8999,
+    "specs": "10-day battery, built-in GPS, 5ATM water resistant, 100+ sport modes",
+    "description": "A GPS running watch built for runners, swimmers and gym sessions.",
+    "attributes": {
+      "battery_hr": 240,
+      "gps": true,
+      "water_resistance": "5ATM",
+      "display_in": 1.4,
+      "wireless": true,
+      "weight_kg": 0.045
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P38",
+    "name": "Zentra Watch Pro",
+    "brand": "Zentra",
+    "category": "Smartwatch",
+    "price": 24999,
+    "specs": "3-day battery, GPS, LTE calling, 1.9-inch AMOLED, IP68",
+    "description": "A premium LTE smartwatch with calling, payments and advanced health tracking.",
+    "attributes": {
+      "battery_hr": 72,
+      "gps": true,
+      "water_resistance": "IP68",
+      "display_in": 1.9,
+      "wireless": true,
+      "weight_kg": 0.05
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P39",
+    "name": "Lumio Band 5",
+    "brand": "Lumio",
+    "category": "Smartwatch",
+    "price": 2499,
+    "specs": "14-day battery, 1.1-inch AMOLED, sleep tracking, 5ATM",
+    "description": "A slim fitness band with two-week battery and sleep tracking.",
+    "attributes": {
+      "battery_hr": 336,
+      "gps": false,
+      "water_resistance": "5ATM",
+      "display_in": 1.1,
+      "wireless": true,
+      "weight_kg": 0.025
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P40",
+    "name": "Vertex Trail X",
+    "brand": "Vertex",
+    "category": "Smartwatch",
+    "price": 34999,
+    "specs": "20-day battery, dual-band GPS, 10ATM, titanium case, offline maps",
+    "description": "A rugged adventure watch with dual-band GPS and offline maps.",
+    "attributes": {
+      "battery_hr": 480,
+      "gps": true,
+      "water_resistance": "10ATM",
+      "display_in": 1.5,
+      "wireless": true,
+      "weight_kg": 0.065
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P41",
+    "name": "SoundCore Boom Mini",
+    "brand": "SoundCore",
+    "category": "Speaker",
+    "price": 1999,
+    "specs": "12hr battery, IPX7 waterproof, 5W output, Bluetooth 5.3",
+    "description": "A palm-sized waterproof speaker for the shower, beach or pool.",
+    "attributes": {
+      "battery_hr": 12,
+      "anc": false,
+      "water_resistance": "IPX7",
+      "wireless": true,
+      "driver_mm": 45,
+      "weight_kg": 0.3
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P42",
+    "name": "Arcwave PartyMax 100",
+    "brand": "Arcwave",
+    "category": "Speaker",
+    "price": 12999,
+    "specs": "18hr battery, 100W output, RGB lights, IPX5, karaoke mic input",
+    "description": "A loud party speaker with light show and karaoke support.",
+    "attributes": {
+      "battery_hr": 18,
+      "anc": false,
+      "water_resistance": "IPX5",
+      "wireless": true,
+      "driver_mm": 100,
+      "weight_kg": 5.5
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P43",
+    "name": "Lumio Home Smart",
+    "brand": "Lumio",
+    "category": "Speaker",
+    "price": 6999,
+    "specs": "Wi-Fi + Bluetooth, voice assistant, 360-degree sound, mains powered",
+    "description": "A smart home speaker with a built-in voice assistant and room-filling sound.",
+    "attributes": {
+      "anc": false,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 63,
+      "weight_kg": 1.1
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P44",
+    "name": "Zentra Roam 20",
+    "brand": "Zentra",
+    "category": "Speaker",
+    "price": 4499,
+    "specs": "24hr battery, IP67 dust & waterproof, 20W output, stereo pairing",
+    "description": "A rugged outdoor speaker with 24-hour playback for trips and treks.",
+    "attributes": {
+      "battery_hr": 24,
+      "anc": false,
+      "water_resistance": "IP67",
+      "wireless": true,
+      "driver_mm": 52,
+      "weight_kg": 0.6
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P45",
+    "name": "Vertex SoundBar 500",
+    "brand": "Vertex",
+    "category": "Speaker",
+    "price": 19999,
+    "specs": "5.1 channel, 500W output, wireless subwoofer, Dolby Atmos, HDMI eARC",
+    "description": "A cinematic Dolby Atmos soundbar with wireless subwoofer.",
+    "attributes": {
+      "anc": false,
+      "water_resistance": null,
+      "wireless": true,
+      "driver_mm": 60,
+      "weight_kg": 6.0
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P46",
+    "name": "Pixelon View 24",
+    "brand": "Pixelon",
+    "category": "Monitor",
+    "price": 9999,
+    "specs": "24-inch Full HD, IPS, 75Hz, 99% sRGB",
+    "description": "An affordable everyday monitor with accurate colours for office and study.",
+    "attributes": {
+      "display_in": 24,
+      "resolution": "1920x1080",
+      "refresh_hz": 75,
+      "panel": "IPS",
+      "color_gamut_srgb": 99
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P47",
+    "name": "Vertex Strike 27",
+    "brand": "Vertex",
+    "category": "Monitor",
+    "price": 21999,
+    "specs": "27-inch QHD, IPS, 165Hz, 1ms, 100% sRGB",
+    "description": "A fast QHD gaming monitor with 165Hz refresh.",
+    "attributes": {
+      "display_in": 27,
+      "resolution": "2560x1440",
+      "refresh_hz": 165,
+      "panel": "IPS",
+      "color_gamut_srgb": 100
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P48",
+    "name": "Lumio ProArt 27 4K",
+    "brand": "Lumio",
+    "category": "Monitor",
+    "price": 38999,
+    "specs": "27-inch 4K UHD, IPS, 60Hz, 100% sRGB, 98% DCI-P3, USB-C 90W",
+    "description": "A colour-accurate 4K monitor for photo and video editing professionals.",
+    "attributes": {
+      "display_in": 27,
+      "resolution": "3840x2160",
+      "refresh_hz": 60,
+      "panel": "IPS",
+      "color_gamut_srgb": 100
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P49",
+    "name": "Zentra Curve 32",
+    "brand": "Zentra",
+    "category": "Monitor",
+    "price": 26999,
+    "specs": "32-inch QHD curved, VA, 144Hz, 95% sRGB",
+    "description": "An immersive curved monitor for gaming and movies.",
+    "attributes": {
+      "display_in": 32,
+      "resolution": "2560x1440",
+      "refresh_hz": 144,
+      "panel": "VA",
+      "color_gamut_srgb": 95
+    },
+    "in_stock": true
+  },
+  {
+    "id": "P50",
+    "name": "Nova OLED 34",
+    "brand": "Nova",
+    "category": "Monitor",
+    "price": 89999,
+    "specs": "34-inch 4K OLED, 240Hz, 0.03ms, 100% sRGB",
+    "description": "A premium OLED monitor with perfect blacks and blazing refresh rate.",
+    "attributes": {
+      "display_in": 34,
+      "resolution": "3840x2160",
+      "refresh_hz": 240,
+      "panel": "OLED",
+      "color_gamut_srgb": 100
+    },
+    "in_stock": true
+  }
+]
