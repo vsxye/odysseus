@@ -284,6 +284,44 @@
     } catch (e) { /* ignore */ }
   }
 
+  // ------------------------------------------------------------ server LLM (scripts/serve.py)
+  var serverLLM = null; // { model } when /api/health reports ok
+  var statusBase = '';
+  function renderStatus() {
+    if (!statusBase) return;
+    $('status-text').textContent = statusBase + (serverLLM ? ' · LLM: ' + serverLLM.model : '');
+  }
+  function apiUrl(path) { return new URL('../api/' + path, window.location.href).toString(); }
+  function checkServerLLM() {
+    var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var t = setTimeout(function () { if (ctrl) ctrl.abort(); }, 5000);
+    return fetch(apiUrl('health'), { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (d) {
+        if (d && d.ok) { serverLLM = { model: d.model || 'local' }; renderStatus(); }
+      })
+      .catch(function () { /* static hosting: no backend */ })
+      .then(function () { clearTimeout(t); });
+  }
+  function callServerLLM(prompt) {
+    var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var timedOut = false;
+    var t = setTimeout(function () { timedOut = true; if (ctrl) ctrl.abort(); }, 60000);
+    return fetch(apiUrl('llm'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ system: prompt.system, user: prompt.user }),
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (d) {
+        if (!res.ok || d.error || !d.text) throw new Error(d.error || ('HTTP ' + res.status));
+        return d;
+      });
+    }).catch(function (err) {
+      throw timedOut ? new Error('timed out after 60s') : err;
+    }).then(function (d) { clearTimeout(t); return d; }, function (e) { clearTimeout(t); throw e; });
+  }
+
   function ask(q) {
     q = (q || '').trim();
     if (!q || !products || busy) return;
@@ -292,20 +330,26 @@
     updateUrl(q);
     var key = $('api-key').value.trim();
     var model = $('model').value.trim() || E.DEFAULT_MODEL;
-    if (!key) {
+    if (!key && !serverLLM) {
       setAnswer(r.offline_answer, 'offline template', null);
       return;
     }
+    var waitingFor = key ? model : serverLLM.model + ' (local)';
     busy = true;
     $('ask-btn').disabled = true;
     loading(true);
-    $('answer').innerHTML = '<p class="muted">Waiting for ' + esc(model) + '…</p>';
+    $('answer').innerHTML = '<p class="muted">Waiting for ' + esc(waitingFor) + '…</p>';
     $('answer-source').textContent = '';
-    E.callAnthropic(r.prompt, key, model).then(function (res) {
-      var usage = res.usage ? ' · ' + res.usage.input_tokens + ' in / ' + res.usage.output_tokens + ' out' : '';
-      setAnswer(res.text, (res.model || model) + usage, null);
-    }).catch(function (err) {
-      setAnswer(r.offline_answer, 'offline template', 'LLM call failed, so this is the offline answer. ' + (err && err.message ? err.message : String(err)));
+    var call = key
+      ? E.callAnthropic(r.prompt, key, model).then(function (res) {
+          var usage = res.usage ? ' · ' + res.usage.input_tokens + ' in / ' + res.usage.output_tokens + ' out' : '';
+          setAnswer(res.text, (res.model || model) + usage, null);
+        })
+      : callServerLLM(r.prompt).then(function (res) {
+          setAnswer(res.text, 'local LLM · ' + (res.model || serverLLM.model), null);
+        });
+    call.catch(function (err) {
+      setAnswer(r.offline_answer, 'offline template', (key ? 'LLM' : 'Local LLM') + ' call failed, so this is the offline answer. ' + (err && err.message ? err.message : String(err)));
     }).then(function () {
       busy = false;
       $('ask-btn').disabled = false;
@@ -340,13 +384,15 @@
     setStage(st >= 1 && st <= 3 ? st : 3);
     showTab(params.get('tab') === 'catalog' ? 'catalog' : 'assistant');
     var q0 = params.get('q');
+    var healthReady = checkServerLLM();
 
     fetch('../data/products.json', { cache: 'no-cache' })
       .then(function (res) { if (!res.ok) throw new Error('HTTP ' + res.status); return res.json(); })
       .then(function (data) {
         products = data;
         var cats = E.CATEGORIES.filter(function (c) { return products.some(function (p) { return p.category === c; }); });
-        $('status-text').textContent = products.length + ' products · ' + cats.length + ' categories';
+        statusBase = products.length + ' products · ' + cats.length + ' categories';
+        renderStatus();
         $('status').classList.add('ready');
         renderCatalogFilter();
         renderCatalog();
@@ -354,7 +400,7 @@
           $('question').value = q0;
           var idx = SAMPLES.map(function (s) { return s.q; }).indexOf(q0);
           if (idx !== -1) $('chips').children[idx].setAttribute('aria-pressed', 'true');
-          ask(q0);
+          healthReady.then(function () { ask(q0); });
         }
       })
       .catch(function (err) {
