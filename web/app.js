@@ -12,7 +12,7 @@
     { q: 'Which laptop is best for video editing under ₹70,000?', stage: 3 }
   ];
   var STAGE_HELP = {
-    1: 'Stage 1 — no retrieval. The starter catalog (P01–P04, 4 products) is pasted into the prompt in full.',
+    1: 'Stage 1 — no retrieval. The full catalog is sent to the model.',
     2: 'Stage 2 — 50-product catalog. Query parsing, hard filters and BM25 + spec scoring pick the top-k; only those go into the prompt.',
     3: 'Stage 3 — same retrieval plus use-case reasoning (e.g. RAM, GPU, storage for video editing) and one recommendation with a reason.'
   };
@@ -230,8 +230,8 @@
     var tk = '<h3>4 · Prompt size (estimate, ~4 chars per token)</h3>';
     var full = r.tokens.full_catalog, sent = r.tokens.sent, top = Math.max(full, sent);
     if (r.stage === 1) {
-      tk += '<p class="tokens">Whole starter catalog in the prompt (' + r.catalog_size + ' products): <strong>~' + fmtNum(sent) + ' tokens</strong>. ' +
-        'The same approach with all ' + products.length + ' products costs ~' + fmtNum(full) + ' tokens per question.</p>';
+      tk += '<p class="tokens">All ' + r.catalog_size + ' catalog products go into the prompt: <strong>~' + fmtNum(sent) + ' tokens</strong>. ' +
+        'This uses more tokens than retrieval, which sends only the top matches.</p>';
     } else {
       tk += '<p class="tokens"><strong>~' + fmtNum(full) + '</strong> tokens → <strong>~' + fmtNum(sent) + '</strong> tokens, <strong>' + r.tokens.saved_pct + '% saved</strong></p>';
     }
@@ -368,7 +368,7 @@
     Array.prototype.forEach.call($('chips').children, function (c, i) {
       c.setAttribute('aria-pressed', String(SAMPLES[i].q === h.question && SAMPLES[i].stage === stage));
     });
-    renderTrace(E.run(h.question, products, { stage: stage, k: 5 }));
+    renderTrace(E.run(h.question, products, { stage: stage, k: 5, stage1Catalog: 'full' }));
     updateUrl(h.question);
     setAnswer(h.answer, h.source + ' · saved ' + relTime(h.timestamp), h.note || null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -415,7 +415,7 @@
   function ask(q) {
     q = (q || '').trim();
     if (!q || !products || busy) return;
-    var r = E.run(q, products, { stage: stage, k: 5 });
+    var r = E.run(q, products, { stage: stage, k: 5, stage1Catalog: 'full' });
     renderTrace(r);
     updateUrl(q);
     var key = $('api-key').value.trim();
