@@ -1742,7 +1742,7 @@
     var k = opts.k || 5;
     var all = Array.isArray(products) ? products : [];
     var catalog = all;
-    if (stage === 1) {
+    if (stage === 1 && opts.stage1Catalog !== 'full') {
       var starter = all.filter(function (p) { return STARTER_IDS.indexOf(p.id) !== -1; });
       if (starter.length) catalog = starter;
     }
