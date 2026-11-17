@@ -1,20 +1,26 @@
 # TechMart Product Assistant
 
-A question-answering assistant for TechMart, a (fictional) Indian electronics shop. A customer types a question
-in plain English, such as "Which laptop is best for video editing under ₹70,000?". The assistant finds the right
-products in the shop's catalog and writes a short answer. It only uses facts from the catalog. It never makes up
-products, prices or specs. The project has two parts that follow the same logic: a Python package with a command
-line tool and tests, and a static web demo that runs fully in the browser.
+A shopping chat assistant for TechMart, a (fictional) Indian electronics shop. A customer types a question in plain
+English, such as "Which laptop is best for video editing under ₹70,000?". The assistant finds the right products in
+the shop's catalog and writes a short answer. It only uses facts from the catalog. It never makes up products,
+prices or specs.
+
+The project has two parts that follow the same logic:
+
+- a **Python package** with a command line tool and tests (`assistant/`);
+- a **web chat** (`web/`) that runs the same pipeline in JavaScript. It answers follow-up questions, streams
+  replies from a small local LLM, and checks every reply against the catalog before showing it.
 
 ## Live demo
 
-**https://cet-informal-tattoo-jackets.trycloudflare.com/web/**
+**https://seal-clause-med-laughing.trycloudflare.com/web/**
 
-- This link is a Cloudflare tunnel to a laptop running `run.bat` / `scripts/serve.py`. It works only while that
-  laptop, the server and the tunnel are running, and the address changes if the tunnel is restarted.
-- Answers come from Gemini (keys kept on the server, never sent to the browser), with local Ollama and then the
-  offline template as fallbacks. See "Answer sources" below.
-- To run your own copy, see "Run it on your own laptop (one click)" below.
+- This link is a Cloudflare quick tunnel to a laptop that runs `run.bat` (which starts `scripts/serve.py` and
+  Ollama) plus `cloudflared`. It works only while that laptop, the server and the tunnel are running.
+- The address changes every time the tunnel is restarted. If the link is dead, the host laptop is off.
+- Answers come from the local model `qwen2.5:3b` running on that laptop. If the model is slow or down, you get the
+  rule-based answer instead. See "Answer sources" below.
+- To run your own copy, see "Run it on your own laptop (one click)".
 
 ## Run it on your own laptop (one click)
 
@@ -39,36 +45,15 @@ Windows SmartScreen may warn you because the `.bat` file came from the internet.
 3. **Installs `requirements.txt`** into that environment. It only does this again if the file changes.
 4. **Installs Ollama and the `qwen2.5:3b` model** (about 2 GB). Ollama is a free, open-source program that runs
    an LLM on your own laptop. It is installed for your user only. Why: you get real LLM answers with no API key
-   and no cost. If you do not want this, set `TECHMART_SKIP_LLM=1` before running `run.bat`. The app then uses
-   the offline rule-based answers.
-5. **Starts `scripts/serve.py`** on the first free port from 8000 and opens the demo in your browser.
+   and no cost. If you do not want this, set `TECHMART_SKIP_LLM=1` before running `run.bat`. The chat then uses
+   the rule-based answers only.
+5. **Starts `scripts/serve.py`** on the first free port from 8000 and opens the chat in your browser. The server
+   loads the model into memory in the background, so the first answer is fast.
 
 To stop it, close the black console window.
 
 **Uninstall:** delete the project folder. If you also want to remove Ollama, uninstall it from Windows
 **Settings > Apps**.
-
-### Optional: faster answers with Gemini
-
-The local model is free but can be slow on an older laptop. For faster answers, create a file called `.env` in
-the project folder (next to `run.bat`) with your Google Gemini API key(s):
-
-```
-GEMINI_API_KEYS=key1,key2
-GEMINI_MODEL=gemini-flash-lite-latest,gemini-3.5-flash
-```
-
-- `GEMINI_API_KEYS` is a comma-separated list of keys. A single `GEMINI_API_KEY` is also accepted.
-- `GEMINI_MODEL` is optional. The default is `gemini-flash-lite-latest,gemini-3.5-flash`. The models are tried in
-  that order.
-- For each request, the server tries the next key on any error: an HTTP error, a timeout (12 seconds) or an empty
-  answer. If every key and model fails, it falls back to the local Ollama model `qwen2.5:3b`. If that also fails,
-  the page uses the offline template answer.
-- The keys were tested before use, and only working keys are kept in `.env`. Google retires older models for new
-  keys. For example, `gemini-2.5-flash` returned 404 "no longer available to new users". That is why the default
-  uses the `-latest` alias.
-
-Restart `run.bat` after creating the file. Never commit `.env` to git. It is already in `.gitignore`.
 
 ### Command line: `ask.bat`
 
@@ -79,25 +64,149 @@ ask.bat                                                  runs the five assignmen
 ask.bat "Which earbuds have the longest battery life?"   answers one question
 ```
 
-For real LLM answers on the command line, run `set ANTHROPIC_API_KEY=sk-ant-...` in the same window first.
+The command line tool uses the Python package. It does not use the local model. For LLM answers on the command
+line, run `set ANTHROPIC_API_KEY=sk-ant-...` in the same window first. Without a key it gives the rule-based
+answer.
+
+## How the chat works
+
+Every message goes through the same path:
+
+```
+ you type a message
+        |
+        v   (typing dots appear at once)
+ converse()  in web/engine.js, runs in the browser, takes a few milliseconds
+   1. detect the intent        greeting, help, off-topic, product question, compare, list ...
+   2. resolve follow-ups       "anything cheaper?" uses the last search and the last products shown
+   3. retrieve                 parse, hard filters, BM25 + spec scoring (see "How retrieval works")
+   4. grounded answer          a rule-based answer built only from the retrieved products
+   5. prompt                   the retrieved products + catalog-only rules + the last 2 turns
+        |
+        +-- no LLM needed (greeting, help, small talk, off-topic, clarify, overview)
+        |        -> show the grounded answer right away
+        |
+        +-- LLM needed (product questions, recommendations, lists, compare, not found)
+                 |
+                 v
+          POST /api/chat on scripts/serve.py
+          -> local qwen2.5:3b via Ollama, streamed back as NDJSON lines {"delta": "..."}
+                 |
+                 |   no first word within 12 s, error, or empty reply?
+                 |   -> show the grounded answer instead, with a short note
+                 v
+          guard (web/guard.js) checks the reply for products, brands and
+          prices that are not in the catalog
+                 |
+                 +-- clean   -> show the model's reply
+                 +-- invented -> show the grounded answer instead
+        |
+        v
+ answer + product cards + suggestion chips + "How I found this"
+```
+
+### Why it is built this way
+
+- **Typing dots appear at once.** The user sees that the message was received, even before any work is done.
+- **Streaming.** The server passes each piece of text to the browser as soon as the model writes it. With the model
+  already loaded, the first words appear in under a second. The user can start reading while the rest is written.
+- **12 second first-word timeout.** If the model has not started answering within 12 seconds, the chat stops
+  waiting and shows the grounded answer. There is also a 60 second cap on the whole reply. The user never stares
+  at a spinner for a minute.
+- **The grounded answer is always computed first.** `converse()` always returns a complete, correct answer built
+  from the catalog. It is the safety net: it is used when the model is off, slow, broken, stopped early, or caught
+  inventing things. The model only rewords facts that were already found.
+- **The guard.** Small local models can invent products. During testing, `qwen2.5:3b` once recommended an
+  "Acer Predator Helios 300", which TechMart does not sell. The prompt forbids this, but a 3B model does not always
+  obey. So `checkAnswer()` in `web/guard.js` checks the finished reply in code before it is shown. It flags:
+  - a price that matches no catalog product, no budget the user typed, and no difference between two real prices;
+  - an outside brand or product line (Acer, Dell, iPhone, Galaxy, Predator ...). This is allowed only in a
+    "we don't carry X" sentence when the user asked about X;
+  - a product-like name that matches nothing in the catalog, such as "Zentra Vision 99";
+  - an empty or near-empty reply.
+
+  If anything is flagged, the chat shows the grounded answer instead, labelled "rule-based (verified)", with a short
+  note. The reasons are listed under "Answer check" in "How I found this".
+- **Several users at once.** The server runs at most 2 generations at the same time and keeps up to 8 more in a
+  fair first-come queue. A waiting user sees "Waiting for the model, N ahead of you". If the queue is full, or a
+  user waits more than 45 seconds, they get the grounded answer at once. The 12 second timer starts only when their
+  generation starts.
+- **Follow-ups.** `converse()` returns a small `state` (the last search plan, the last product IDs, the last two
+  turns). The next message is read with that state. So these work:
+  - "anything cheaper?" (same search, price below the last top pick)
+  - "under 50k?", "and for gaming?", "with ANC?" (change one part of the last search)
+  - "compare the top two", "compare them"
+  - "tell me more about the first one", "does it have ANC?"
+  - "which is lighter?" (after a compare)
+  - "show more" (the next products you have not seen)
+- **Product cards.** Up to 3 cards under each answer, with price, badge ("Best pick", "Runner-up") and the reasons
+  it was picked. Click a card to ask "Tell me more about ..." about it.
+- **Suggestion chips.** Up to 3 short next questions that fit the answer, such as "Anything cheaper?" or
+  "Compare the top two". One click sends them.
+- **Stop button.** While an answer is being written, Send turns into Stop. If the model has already written
+  something, that part is kept. If not, the grounded answer is shown.
+- **History.** Whole conversations are saved in your browser (`localStorage`, up to 40). The History tab lists them.
+  Opening one restores the messages and their traces without calling the model again. Nothing is sent anywhere.
+  **New chat** starts a fresh conversation.
+- **"How I found this".** Each answer that used retrieval has a collapsible trace: the parsed query, the filter
+  funnel, the ranked products with scores and reasons, the token estimate and the prompt.
+
+### What the chat understands
+
+| Intent | Example | What happens |
+|---|---|---|
+| Greeting, thanks, bye | "hi", "thanks", "bye" | Short friendly reply, instant |
+| Help | "what can you do?", "what is ANC?" | Explains what it can do, or defines the term |
+| Small talk | "how are you?", "tell me a joke" | Short reply, then steers back to shopping |
+| Off-topic | "weather?", "write a poem", "do you sell fridges?" | Polite redirect, lists what TechMart sells |
+| Unknown product | "do you have the iPhone 15?", "PS5" | "We don't carry it", plus the closest products we do have |
+| Product question | "battery of the novabook air?", "does Zentra Vision have a GPU?" | Answers from that product's specs, even with typos or partial names |
+| Recommendation | "best laptop for video editing under ₹70,000" | One pick with a reason, a runner-up, and what the budget excluded |
+| List / cheapest / priciest | "show me all tablets", "cheapest phone", "most expensive laptop" | A short list in the right order |
+| Catalog overview | "what do you sell?" | Categories, counts and price ranges |
+| Compare | "Zentra Vision 15 vs Pixelon Slim 14" | Side-by-side differences |
+| Follow-ups | "anything cheaper?", "compare the top two", "tell me more about the first one" | Reuses the last search and products |
+| Vague | "I need something good" | Asks a clarifying question, with category chips |
+
+It also copes with Hinglish and casual words ("sasta phone chahiye", "10k tak"), lowercase, common typos
+("lapotp for gamng"), emoji, very long text and empty messages.
 
 ## Answer sources
 
-When you ask a question in the web demo, the answer comes from the first of these that is available:
+In the web chat, the answer comes from the first of these that works:
 
-1. **Your Anthropic API key**, if you paste one into the page. The browser calls Anthropic directly.
-2. **The server's LLM**, when the page is served by `scripts/serve.py`. This is Google Gemini if `.env` has
-   `GEMINI_API_KEYS`, otherwise the local Ollama model `qwen2.5:3b`. The keys stay on the server. The browser
-   never sees them; it only calls `/api/llm` on the local server. `/api/health` shows which provider and model
-   are in use.
-3. **The offline rule-based answer**, if no LLM is available. It is built from a template filled with the ranked
-   products.
+1. **The local model `qwen2.5:3b` via Ollama** (the default). The browser calls `/api/chat` on `scripts/serve.py`,
+   and the server calls Ollama on the same laptop. No API key, no cost, nothing leaves the laptop. Each reply is
+   labelled "qwen2.5:3b · local".
+2. **The grounded rule-based answer**, built from the same retrieved products. It is used when the model is off,
+   not installed, too slow, fails, or the guard rejects its reply. It is labelled "rule-based answer".
 
-The product search and ranking are the same in all three cases. Only the final wording changes.
+The product search and ranking are the same in both cases. Only the wording changes.
+
+**Model setting.** The gear button (or the model status pill) opens a small panel with a **Use local LLM** switch.
+Turn it off to get instant rule-based answers only. The choice is saved in your browser. The status pill shows
+whether the model is ready, warming up, off, or unreachable.
+
+**Server endpoints** (`scripts/serve.py`, standard library only):
+
+- `GET /api/health` returns `ok`, `provider` ("ollama"), `model`, `warm`, and the current `busy` and `queued`
+  counts. It answers in under a second and is never blocked by a generation.
+- `POST /api/chat` takes `{"system", "messages"}` and streams NDJSON, one JSON object per line:
+  `{"queued": N}` (N requests ahead of you, repeated every 5 seconds so the Cloudflare tunnel does not time out),
+  `{"start": true}`, then `{"delta": "..."}` pieces, then `{"done": true, "model", "ms"}`. On failure it sends one
+  `{"error": "..."}` line, or `{"error": "busy", "retry_after": 10}` if the queue is full. Every line is sent
+  at once, not buffered. If the browser disconnects, it leaves the queue, or its generation stops.
+- `POST /api/llm` is the older non-streaming endpoint, kept for compatibility. It uses the same queue.
+
+The model runs with temperature 0.3, at most 350 tokens per reply, a 4096-token context, and stays loaded for 30
+minutes after the last request. The server loads it in the background when it starts.
+
+The Python command line tool is separate: it uses Anthropic if `ANTHROPIC_API_KEY` is set, otherwise the offline
+template (see "Run it locally").
 
 ## Sharing it from your laptop with Cloudflare
 
-To let someone else try the demo running on your laptop, install
+To let someone else try the chat running on your laptop, install
 [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) and run:
 
 ```
@@ -106,21 +215,27 @@ cloudflared tunnel --url http://localhost:8000
 
 It prints a temporary `https://<random-name>.trycloudflare.com` link. Add `/web/` to the end and share it. The link
 works only while your laptop is on and both `run.bat` and `cloudflared` are running. If `serve.py` picked a port
-other than 8000, use that port instead. Anyone with the link uses your server's LLM (your Gemini keys or your
-local Ollama), so share it only with people you trust.
+other than 8000, use that port instead. Anyone with the link uses your laptop's local model (2 at a time, the rest
+wait in the queue), so share it only with people you trust.
 
 ## Screenshots
 
+All screenshots are from the chat version, answered live by the local qwen2.5:3b model.
+
 | | |
 |---|---|
+| ![Welcome screen](docs/screenshots/00_welcome.png) | ![Follow-ups and compare](docs/screenshots/09_followups_compare.png) |
+| Welcome screen with the assignment questions as chips | Follow-ups: "anything cheaper?" then "compare the top two" |
 | ![Stage 1: NovaBook Air RAM question](docs/screenshots/01_stage1_novabook_ram.png) | ![Stage 1: earbuds battery question](docs/screenshots/02_stage1_earbuds_battery.png) |
 | Stage 1: "Does the NovaBook Air have enough RAM for coding?" | Stage 1: "Which earbuds have the longest battery life?" |
 | ![Stage 2: headphones under ₹10,000](docs/screenshots/03_stage2_headphones_under_10k.png) | ![Stage 2: laptops for students](docs/screenshots/04_stage2_student_laptops.png) |
-| Stage 2: wireless headphones under ₹10,000 with good battery | Stage 2: "What laptops do you have for students?" |
-| ![Stage 3: video editing under ₹70,000](docs/screenshots/05_stage3_video_editing.png) | ![Catalog browser](docs/screenshots/06_catalog_browser.png) |
-| Stage 3: best laptop for video editing under ₹70,000, with the parsed query and ranking shown | The catalog browser with all 50 products |
-| ![Mobile view](docs/screenshots/07_mobile_stage3.png) | ![History view](docs/screenshots/08_history.png) |
-| The Stage 3 answer on a phone screen | History view: past questions, click to restore |
+| Stage 2: headphones under ₹10,000, then "which has ANC?" | Stage 2: "What laptops do you have for students?" |
+| ![Stage 3: video editing under ₹70,000](docs/screenshots/05_stage3_video_editing.png) | ![Off-topic and unknown products](docs/screenshots/10_offtopic_unknown.png) |
+| Stage 3: video editing under ₹70,000, with "How I found this" open | Greeting, a product we don't carry (iPhone 15) and an off-topic question |
+| ![Catalog browser](docs/screenshots/06_catalog_browser.png) | ![History view](docs/screenshots/08_history.png) |
+| The catalog browser with all 50 products | Saved conversations in the History tab |
+| ![Mobile view](docs/screenshots/07_mobile_stage3.png) | |
+| The chat on a phone screen | |
 
 ## The assignment in brief
 
@@ -133,7 +248,12 @@ Build a product Q&A assistant for TechMart. Answers must come only from the cata
 | 3 | Questions now carry constraints and a purpose. A price limit must be a hard filter, and products must be ranked by the specs that matter for the job. The answer must be one recommendation with a reason, not a list. | "Which laptop is best for video editing under ₹70,000?" |
 | 4 | No code. Explain how the design would change for 50,000+ products. | See [Scaling to 50,000+ products](#scaling-to-50000-products-stage-4) |
 
-## How it works
+The chat start screen shows the five test questions as chips, tagged S1, S2 and S3. Clicking one also switches
+the stage. The stage switcher above the chat stays, so each stage can be shown on its own. The default is Stage 3.
+
+## How retrieval works
+
+This is the part inside `converse()` (and inside the Python package) that finds the products.
 
 ```
  customer question
@@ -151,14 +271,14 @@ Build a product Q&A assistant for TechMart. Answers must come only from the cata
  4. PROMPT       top 5 products + the rules ("answer only from this catalog")
         |
         v
- 5. ANSWER       Anthropic LLM  --or--  offline template (no API key)
+ 5. ANSWER       LLM (local qwen2.5:3b in the web chat, Anthropic in the CLI)  --or--  rule-based answer
         |
         v
  answer + trace (parsed plan, ranked products, reasons, excluded products, token estimate)
 ```
 
-The same pipeline exists twice: in Python (`assistant/`) and in JavaScript (`web/engine.js`), so the web demo
-can run as plain static files with no server.
+The same pipeline exists twice: in Python (`assistant/`) and in JavaScript (`web/engine.js`), so the chat can do
+all its retrieval in the browser.
 
 ### Step 1: Parse the question (`assistant/query_parser.py`)
 
@@ -182,7 +302,7 @@ can run as plain static files with no server.
 
 **Why rules and not an LLM?** Rules are instant, free, and always give the same result, which makes them easy to
 test. The questions in this shop have a small, predictable shape (category + budget + purpose). An LLM parser
-would add a second API call and a second point of failure for every question. For a much larger shop, an LLM
+would add a second model call and a second point of failure for every question. For a much larger shop, an LLM
 parser becomes worth it (see Stage 4).
 
 ### Step 2: Hard filters (`retrieval.py`, `_passes`)
@@ -260,12 +380,15 @@ The sort order is: products named in the question first, then the superlative at
 
 Every product carries a `why` list, for example
 `16GB RAM (best in set); RTX 4050 GPU (best in set); ₹68,990 ≤ ₹70,000; matches: laptop, editing, creator`.
-These reasons are shown in the CLI and the web demo, and they are also sent to the LLM.
+These reasons are shown on the product cards and in the trace, and they are also sent to the LLM.
 
-### Step 4: Build the prompt (`assistant/llm.py`)
+### Step 4: Build the prompt (`assistant/llm.py`, and `converse()` in the web chat)
 
 **What.** The prompt has a fixed system message plus the top 5 products (one compact line each, with score and
 reasons), the filters that were applied, any relaxation note, the products excluded by budget, and the question.
+In the web chat it also includes the grounded answer and a short summary of the last two turns, so the model
+understands follow-ups. The server adds a short style note for the small model: be brief, use only the products
+given, prices in ₹, no product IDs.
 
 The system message tells the model to:
 
@@ -277,49 +400,42 @@ The system message tells the model to:
 5. respect the hard filters, and say so if they were relaxed;
 6. be short (2-6 sentences).
 
-**Why only the top 5 products, not all 50?** Cost and focus. The full 50-product catalog is about 2,500 prompt
-tokens per question. The top 5 is about 600 to 800 tokens, roughly 3 to 4 times less (the web demo shows this
-saving for every question). At 50,000 products the full
-catalog would not fit in any prompt. A smaller context also leaves the model fewer wrong products to pick from.
+**Why only the top 5 products, not all 50?** Cost, speed and focus. The full 50-product catalog is about 2,500
+prompt tokens per question. The top 5 is about 600 to 800 tokens, roughly 3 to 4 times less (the trace shows this
+saving for every question). A small local model also answers faster with a short prompt. At 50,000 products the
+full catalog would not fit in any prompt. A smaller context also leaves the model fewer wrong products to pick from.
 
 **Why the "catalog only" rules?** A shop assistant that invents a spec or a price is worse than useless. The model
 only sees real catalog lines, and the rules tell it what to do when the answer is not there. Giving it the
 pre-computed reasons ("best in set", "over budget") also means the model explains a ranking that was already
-computed correctly, instead of redoing the comparison itself.
+computed correctly, instead of redoing the comparison itself. The guard then checks that it actually did.
 
-### Step 5: Answer (LLM or offline)
+### Step 5: Answer (LLM or rule-based)
 
-**LLM mode.** `call_llm()` calls the Anthropic Messages API. The default model is `claude-haiku-5-5` (small, fast,
+**Web chat.** The local model `qwen2.5:3b` writes the reply, streamed through `scripts/serve.py`. If that fails,
+or the guard rejects the reply, the grounded answer from `converse()` is used.
+
+**Python CLI.** `call_llm()` calls the Anthropic Messages API. The default model is `claude-haiku-5-5` (small, fast,
 cheap; the hard work is already done by retrieval). Set `TECHMART_MODEL` to use a different model. The key comes from
 `ANTHROPIC_API_KEY`.
 
-**Offline mode.** `offline_answer()` writes the answer from templates and the ranked list. There is one template per
-intent: a product question (for example, the RAM verdict for the NovaBook Air), a superlative, a recommendation (pick +
-reason + runner-up + excluded), and a list.
+**Rule-based (offline) answer.** `offline_answer()` in Python, and the answer builders in `engine.js`, write the
+answer from templates and the ranked list. There is one template per kind of answer: a product question (for
+example, the RAM verdict for the NovaBook Air), a superlative, a recommendation (pick + reason + runner-up +
+excluded), a list, a comparison, and "not found".
 
-**Why an offline mode?**
+**Why a rule-based answer?**
 
 - The demo and the tests run without an API key, without network, and without cost.
 - The output is the same every time, so tests can check exact facts.
-- If the API call fails (no key, network error, rate limit), the assistant still answers instead of crashing.
+- If the model fails, is slow, or invents something, the assistant still gives a correct answer.
 - It proves that the retrieval and ranking are correct on their own. The LLM only words the answer.
-
-### History (web demo)
-
-Every answered question is saved in your browser (`localStorage`). It keeps the last 50, newest first. History is
-never sent anywhere.
-
-- The **History** tab lists each question with its stage, the model that answered, the time and the top pick.
-- Click an entry to restore it. The page shows the saved answer and recomputes the pipeline trace. It does not
-  call the LLM again. Why: this is free, instant, and uses no extra API quota.
-- You can delete one entry or clear all of them.
-- **Recent** chips under the sample questions let you reopen your latest questions in one click.
 
 ## Stage-by-stage walkthrough
 
 The outputs below are real, from `python -m assistant --demo --offline` (offline mode, so no LLM wording). The same
-output is saved in [docs/sample_outputs.md](docs/sample_outputs.md). With an API key, the LLM gets the same products
-and writes the final answer in its own words. The web demo uses the same products and reasons, but its offline
+output is saved in [docs/sample_outputs.md](docs/sample_outputs.md). With an LLM, the model gets the same products
+and writes the final answer in its own words. The web chat uses the same products and reasons, but its rule-based
 answers are worded a little differently.
 
 ### Stage 1, question 1: "Does the NovaBook Air have enough RAM for coding?"
@@ -407,10 +523,12 @@ answers are worded a little differently.
   > graphics instead of RTX 4050). Excluded: NovaBook Pro 15 (₹78,000) and Pixelon Blaze 15 (₹89,990) are over budget.
 - **Why this is right:** one pick, a reason tied to specs, a runner-up with its trade-off, and a note on why the
   stronger laptops are missing.
+- **In the chat:** follow with "anything cheaper?" and the chat searches laptops under ₹68,990 for video editing.
+  "Compare the top two" then compares the Zentra Vision 15 and the Pixelon Slim 14.
 
 ## The catalog (`data/products.json`)
 
-50 fictional products in 8 categories. One JSON file is used by both the Python code and the web demo.
+50 fictional products in 8 categories. One JSON file is used by both the Python code and the web chat.
 
 | Category | Count | Price range |
 |---|---|---|
@@ -445,14 +563,14 @@ and scoring. Text is for matching words; numbers are for comparing.
 ## Project structure
 
 ```
-data/products.json        the catalog: 50 products, used by Python and the web demo
+data/products.json        the catalog: 50 products, used by Python and the web chat
 assistant/
   __init__.py             public API: answer, load_catalog, parse_query, retrieve, Product, QueryPlan
   __main__.py             lets you run `python -m assistant`
   catalog.py              Product dataclass, load_catalog(), product_to_text(), format_inr() (₹1,24,990 style)
   query_parser.py         parse_query(): question -> QueryPlan (category, price, use case, flags, names, intent)
   retrieval.py            retrieve(): hard filters + relaxation, BM25, use-case spec scoring, why-reasons
-  llm.py                  SYSTEM_PROMPT, build_user_prompt(), call_llm() (Anthropic), offline_answer()
+  llm.py                  SYSTEM_PROMPT, build_user_prompt(), call_llm() (Anthropic, CLI only), offline_answer()
   assistant.py            answer(question, stage, top_k, offline): runs the pipeline, returns answer + trace
   cli.py                  command line tool: --stage --offline --k --json --trace --demo
 tests/
@@ -460,21 +578,27 @@ tests/
   test_query_parser.py    prices ("70k", "between"), "16GB" is not a price, categories, use cases, name pinning
   test_bm25.py            BM25 ranking, CPU score tiers, ₹ formatting, offline mode never imports the SDK
   test_retrieval.py       the five assignment questions end to end, lexical trap, relaxation, unknown products
+  engine_chat.test.js     Node tests for converse(): intents, follow-ups, typos, off-topic, the five queries
+  guard.test.js           Node tests for the guard: invented products and prices are caught, real ones pass
+  load_test.py            load test for serve.py: many users at once, queue, disconnects, "busy" when full
 web/
-  index.html              the demo page
-  styles.css              page styles (light and dark)
-  engine.js               JavaScript port of the same pipeline (parse, filter, BM25, scoring, prompt, offline answer)
-  app.js                  page logic: stage switch, example questions, API key box, trace view, catalog browser
+  index.html              the chat page (Assistant, Catalog and History tabs, model settings)
+  styles.css              page styles (light and dark, works down to phone width)
+  engine.js               JavaScript pipeline: run() (parse, filter, BM25, scoring, prompt, rule-based answer)
+                          and converse() (intents, follow-ups, cards, chips, chat prompt)
+  guard.js                checks a model reply for products and prices that are not in the catalog
+  app.js                  chat logic: thread, streaming from /api/chat, timeouts, Stop, cards, chips,
+                          "How I found this", conversation history, catalog browser
 index.html                redirects the site root to web/
 docs/
-  SPEC.md                 the shared design spec the code was built from
+  SPEC.md                 the shared design spec the pipeline was built from
+  CHAT_CONTRACT.md        the contract between engine.js, app.js and serve.py for the chat version
   sample_outputs.md       full output of `python -m assistant --demo --offline`
   screenshots/            screenshots used in this README
 scripts/
-  serve.py                local server for run.bat: serves the demo, /api/llm (Gemini or Ollama), /api/health
+  serve.py                local server: serves the chat, /api/chat (streaming Ollama, fair queue), /api/health, /api/llm
 run.bat                   one-click Windows launcher (portable Python, .venv, Ollama, starts serve.py)
 ask.bat                   command line version, uses the .venv that run.bat created
-.env                      your Gemini keys (optional, you create it; gitignored, never committed)
 requirements.txt          Python dependencies (anthropic, pytest)
 pyproject.toml            package metadata and pytest settings
 .nojekyll                 lets the files be served as-is by static hosts
@@ -502,32 +626,48 @@ python -m assistant "What laptops do you have for students?" --stage 2   # pick 
 python -m assistant "best earbuds for the gym" --k 3                     # how many products to retrieve
 python -m assistant "..." --json                                         # full result as JSON
 python -m assistant "..." --trace                                        # also print the prompt and timing
-
-# run the tests
-python -m pytest -q
 ```
 
-The test suite has 29 tests and they all pass (`29 passed`). They cover the five assignment questions, the
-budget and category filters, the "watching videos" trap, relaxation when nothing matches, and the "we don't carry
-the iPhone 15 Pro" guard.
-
-For real LLM answers, set the key first:
+For LLM answers in the CLI, set the Anthropic key first:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...        # Windows PowerShell: $env:ANTHROPIC_API_KEY="sk-ant-..."
 export TECHMART_MODEL=claude-haiku-5-5     # optional, this is the default
 ```
 
-Without a key, the assistant uses offline mode automatically. If the API call fails, it also falls back to offline
+Without a key, the CLI uses offline mode automatically. If the API call fails, it also falls back to offline
 mode and prints the error under the answer.
 
-**Web demo.** The page loads `data/products.json`, so serve the repository root (opening the HTML file directly
-will not work, because browsers block local file loading):
+**Run the tests.**
 
 ```bash
-python -m http.server 8000
-# open http://localhost:8000/web/
+python -m pytest -q                  # Python package: parser, BM25, retrieval, the five questions
+node tests/engine_chat.test.js       # web engine: converse() intents and follow-ups
+node tests/guard.test.js             # web guard: invented products and prices
 ```
+
+The Node tests need only Node.js, no packages. With the server running, `python tests/load_test.py --base
+http://localhost:8000 --users 8` checks that it stays responsive with many users. The Python tests cover the five assignment questions, the budget and
+category filters, the "watching videos" trap, relaxation when nothing matches, and the "we don't carry the iPhone
+15 Pro" case.
+
+**Web chat.** The easiest way is `run.bat`. By hand, start Ollama, pull the model and run the server:
+
+```bash
+ollama pull qwen2.5:3b
+python scripts/serve.py
+# opens http://localhost:8000/web/
+```
+
+Environment variables for `serve.py`: `TECHMART_PORT` (first port to try, default 8000), `TECHMART_LOCAL_MODEL`
+(default `qwen2.5:3b`), `OLLAMA_URL` (default `http://127.0.0.1:11434`), `TECHMART_NO_BROWSER=1` (do not open a
+browser), `TECHMART_MAX_PARALLEL` (default 2), `TECHMART_MAX_QUEUE` (default 8), `TECHMART_QUEUE_TIMEOUT` (seconds,
+default 300). Two generations only truly run side by side if Ollama itself was started with `OLLAMA_NUM_PARALLEL=2`;
+otherwise Ollama runs them one after the other, which is still safe.
+
+Without Ollama the chat still works and gives rule-based answers. Any static server works too
+(`python -m http.server 8000`, then open `http://localhost:8000/web/`), but then there is no model. Opening the HTML
+file directly does not work, because browsers block loading `data/products.json` from a local file.
 
 ## Design decisions and trade-offs
 
@@ -535,31 +675,37 @@ python -m http.server 8000
 rules (budget, category). BM25 matches words. Spec profiles judge "good for X". Together they get all five test
 questions right, and each step can be checked on its own in the trace.
 
+**A small local model, wrapped in code.** The web chat uses a 3B model on the laptop: free, private, and fast
+enough when streamed. It is also the model most likely to make mistakes, so the code does the hard parts
+(finding, filtering, ranking, follow-ups), the model only writes the words, and the guard checks its words. If
+anything goes wrong, the grounded answer is shown.
+
 **Alternatives considered:**
 
 | Alternative | Why it was not chosen (at this size) |
 |---|---|
 | **Put the whole catalog in the prompt** (the Stage 1 approach) | Works for 4 products. At 50 it costs about 4 times more tokens per question, and at 50,000 it does not fit at all. The model also has to do the budget filtering itself, and it can get it wrong. |
 | **Embeddings + vector database** | Good at meaning ("something for my commute" -> travel). But embeddings do not understand "under ₹70,000"; numbers are just text to them. You still need hard filters. For 50 products it adds a model, an index and a dependency, for little gain over BM25 + rules. It is the right move at scale, together with filters (see Stage 4). |
-| **LLM parses the question into JSON** | More flexible with unusual wording. But it adds an extra API call (cost and delay) to every question, can fail, and is not deterministic, which makes testing harder. Rules cover the expected questions. At scale, an LLM parser with a rules fallback is the plan. |
+| **LLM parses the question into JSON** | More flexible with unusual wording. But it adds an extra model call (cost and delay) to every question, can fail, and is not deterministic, which makes testing harder. Rules cover the expected questions. At scale, an LLM parser with a rules fallback is the plan. |
 | **Let the LLM do the filtering and ranking** | LLMs are bad at strict numeric rules over many items. They may recommend the ₹78,000 laptop "because it is only a bit over". Doing the arithmetic in code makes the rules exact; the LLM only explains the result. |
-| **Fixed category templates instead of an LLM** | This is the offline mode. It is reliable but stiff. The LLM gives more natural answers and handles follow-up nuance, so both are kept. |
+| **Let the LLM track the conversation** | A 3B model often loses track of "the first one" or "cheaper than what?". `converse()` resolves follow-ups in code with a small state object, so the right products are retrieved before the model sees anything. |
+| **Wait for the full reply, then show it** | Simpler, but a small model on a laptop can take 10-20 seconds for a full reply. Streaming shows the first words in under a second. |
+| **A hosted LLM API** | Faster and smarter, but needs keys, costs money, and sends questions to a third party. An earlier version used Gemini with key rotation; it was removed to keep the demo free, private and simple. |
 
 **Other trade-offs:**
 
-- **Two implementations (Python + JavaScript).** The web demo must also work as plain static files with no server, so the engine
-  is ported to JavaScript. The cost is keeping two copies in sync. Both follow `docs/SPEC.md` and pick the same
-  top product for all five test questions. There are small differences: the web engine applies the use-case
-  profile in Stage 2 too (so its Stage 2 student answer already puts the Arcwave Campus 14 first), it has a few
-  extra boosts from words like "cheap", "light", "ANC" and "waterproof", and its offline answers are worded
-  differently.
+- **Two implementations (Python + JavaScript).** The chat does its retrieval in the browser, so the engine is
+  ported to JavaScript. The cost is keeping two copies in sync. Both follow `docs/SPEC.md` and pick the same top
+  product for all five test questions. There are small differences: the web engine applies the use-case profile in
+  Stage 2 too (so its Stage 2 student answer already puts the Arcwave Campus 14 first), it has a few extra boosts
+  from words like "cheap", "light", "ANC" and "waterproof", and its rule-based answers are worded differently.
+  Only the web engine has `converse()` and follow-ups.
 - **Hand-set weights.** The profile weights are reasoned, not learned. They are easy to read and change, but they are
   opinions. With real usage data they should be tuned against an evaluation set.
-- **The key in the browser.** The web demo calls the Anthropic API directly from the browser (with the
-  `anthropic-dangerous-direct-browser-access` header). This is fine for a demo where users paste their own key. A real
-  shop would call the LLM from its own server and never expose a key.
+- **A small queue on one laptop.** The server runs 2 model replies at once and queues up to 8 more. That is fine
+  for a demo, not for a real shop.
 - **Stage 1 uses only the 4 starter products.** This matches the assignment: pasting the whole catalog is fine at 4
-  products. The web demo also shows how many tokens the full 50-product catalog would cost for each question.
+  products. The trace also shows how many tokens the full 50-product catalog would cost for each question.
 
 ## Scaling to 50,000+ products (Stage 4)
 
@@ -592,24 +738,26 @@ The shape of the pipeline stays the same: parse, filter, rank, prompt, answer. W
 9. **Monitoring and cost control.** Log the plan, the retrieved products and the answer for each question. Watch
    latency, token use, "nothing matched" rates and user feedback. Use a small model by default and a larger one
    only for hard questions.
-10. **Answer guardrails.** After the LLM answers, check in code that every product name and price it mentions exists
-    in the retrieved context. If not, regenerate or fall back to the template.
+10. **Answer guardrails.** The web chat already has a simple guard that rejects replies naming products or prices
+    not in the catalog. At scale, check every name, price and spec against the retrieved context, and regenerate or
+    fall back to the template when the check fails.
+11. **Serving the model.** Run the LLM on a proper inference server (or a hosted API) that can handle many requests at
+    once, instead of one laptop with a small queue.
 
 ## Limitations and next steps
 
-- **The parser is rule-based.** It handles the expected phrasings well, but unusual wording can be missed
-  (for example "something to cut my YouTube vlogs on" is caught, but a question with no known keyword is not).
-  Next step: an LLM parser with structured output, keeping the rules as a fallback.
-- **No conversation memory.** Each question is answered on its own; "what about a cheaper one?" does not work.
-  Next step: keep the last QueryPlan and merge the follow-up into it.
+- **The parser is rule-based.** It handles the expected phrasings, Hinglish and common typos, but unusual wording can
+  still be missed. Next step: an LLM parser with structured output, keeping the rules as a fallback.
+- **Follow-ups are rule-based too.** The chat remembers the last search, the last products and the last two turns.
+  Questions that refer further back ("the phone you showed me earlier") may not resolve.
+- **The guard is simple.** It checks product names, brands and prices. A wrong spec in otherwise correct text (for example a
+  wrong battery figure) can still get through.
 - **Spec weights are hand-made.** They should be checked against real buyer choices or expert ratings.
-- **Stage 2 has no spec profile.** By design it is text search plus filters, so "laptops for students" in Stage 2
-  still shows expensive laptops lower in the list. Stage 3 fixes this.
-- **Offline answers are templates.** They are correct but less natural than LLM answers.
+- **Stage 2 has no spec profile in Python.** By design it is text search plus filters, so "laptops for students" in
+  Stage 2 still shows expensive laptops lower in the list. Stage 3 fixes this.
 - **The Python and JavaScript engines are separate copies.** Small differences can creep in. A shared test file of
   questions and expected rankings, run against both, would catch this.
-- **No check of the LLM output.** The prompt forbids invented facts, but nothing verifies the reply yet. Next step:
-  check every product name and price in the answer against the catalog.
+- **The live demo depends on one laptop.** If it is off or busy, the link is dead or slow.
 
 ## Changelog
 
@@ -620,5 +768,6 @@ What was built, in order:
 3. GEOai-style user interface.
 4. Local LLM bridge (Ollama) and Cloudflare tunnel.
 5. One-click `run.bat` launcher.
-6. Gemini backend with key rotation.
+6. Gemini backend with key rotation (later removed in step 8).
 7. Question history.
+8. Chat rebuild: streaming local qwen, conversation follow-ups, guard against invented products, Gemini removed.

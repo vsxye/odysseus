@@ -107,8 +107,13 @@
                fmt: function (p) { var w = attr(p, 'water_resistance'); return w ? w + ' water resistance' : 'no water rating'; } },
     resolution: { label: 'resolution', dir: 1, get: function (p) { return resolutionScore(attr(p, 'resolution')); }, fmt: function (p) {
                  var r = attr(p, 'resolution'); return ({ '3840x2160': '4K', '2560x1440': 'QHD', '1920x1080': 'Full HD' })[r] || r; } },
-    color:   { label: 'colour accuracy', dir: 1, get: function (p) { return attr(p, 'color_gamut_srgb'); }, fmt: function (p) { return attr(p, 'color_gamut_srgb') + '% sRGB'; } }
+    color:   { label: 'colour accuracy', dir: 1, get: function (p) { return attr(p, 'color_gamut_srgb'); }, fmt: function (p) { return attr(p, 'color_gamut_srgb') + '% sRGB'; } },
+    // only used when a plan asks for them (chat layer boosts); never active for plain run() queries
+    screen:  { label: 'screen size', dir: 1, best: 'biggest', get: function (p) { return attr(p, 'display_in'); }, fmt: function (p) { return attr(p, 'display_in') + '-inch display'; } },
+    camera:  { label: 'camera', dir: 1, get: function (p) { return specNum(p, /(\d+)\s*MP\b/i); }, fmt: function (p) { return specNum(p, /(\d+)\s*MP\b/i) + 'MP camera'; } }
   };
+
+  function specNum(p, re) { var m = String(p.specs || '').match(re); return m ? parseFloat(m[1]) : null; }
 
   // ---------------------------------------------------------------- use cases
   // Laptop weights are straight from the SPEC. Monitor-only attributes (resolution/color) are
@@ -336,7 +341,8 @@
   function retrieve(question, products, opts) {
     opts = opts || {};
     var k = opts.k || 5;
-    var plan = parseQuery(question, products);
+    // opts.plan lets the chat layer retrieve with a merged/constructed plan (follow-ups); default is unchanged.
+    var plan = opts.plan || parseQuery(question, products);
     var index = buildIndex(products);
     var funnel = [{ label: 'Catalog', count: products.length }];
     var pinned = products.filter(function (p) { return plan.pinned_ids.indexOf(p.id) !== -1; });
@@ -812,7 +818,7 @@
       var starter = products.filter(function (p) { return STARTER_IDS.indexOf(p.id) !== -1; });
       if (starter.length) catalog = starter;
     }
-    var ret = retrieve(question, catalog, { k: k });
+    var ret = retrieve(question, catalog, { k: k, plan: opts.plan });
     var prompt = stage === 1 ? buildPrompt(question, { stage: 1, fullCatalog: catalog }) : buildPrompt(question, { stage: stage, retrieval: ret });
     var fullPrompt = buildPrompt(question, { stage: 1, fullCatalog: products });
     var answer = composeAnswer(question, ret, stage);
@@ -865,6 +871,1475 @@
     });
   }
 
+  // ================================================================ conversation layer: converse()
+  // Pure + synchronous. Intent detection -> (follow-up resolution via state) -> retrieval -> deterministic,
+  // catalog-grounded answer + cards + suggestion chips + a compact LLM prompt. See docs/CHAT_CONTRACT.md §1.
+
+  var CAT_WORD = { Laptop: 'laptop', Smartphone: 'phone', Tablet: 'tablet', Earbuds: 'earbuds', Headset: 'headset',
+    Smartwatch: 'smartwatch', Speaker: 'speaker', Monitor: 'monitor' };
+  var CAT_TITLE = { Laptop: 'Laptops', Smartphone: 'Smartphones', Tablet: 'Tablets', Earbuds: 'Earbuds', Headset: 'Headsets',
+    Smartwatch: 'Smartwatches', Speaker: 'Speakers', Monitor: 'Monitors' };
+
+  function catsNoun(cats) {
+    if (cats.length === 2 && cats.indexOf('Headset') !== -1 && cats.indexOf('Earbuds') !== -1) return 'headphones';
+    return cats.length ? joinNatural(cats.map(function (c) { return CAT_PLURAL[c]; })) : 'products';
+  }
+  function catsWordQ(cats) {
+    if (cats.length === 2 && cats.indexOf('Headset') !== -1 && cats.indexOf('Earbuds') !== -1) return 'headphones';
+    return cats.map(function (c) { return CAT_WORD[c]; }).join(' and ');
+  }
+  function cloneJSON(o) { return o == null ? o : JSON.parse(JSON.stringify(o)); }
+  function escRe(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function cap(s) { return String(s).replace(/^./, function (c) { return c.toUpperCase(); }); }
+
+  // ---------------------------------------------------------------- normalisation
+  var HINGLISH = [
+    [/\b(kaise ho|kaisa hai|kaise hain|kya haal( hai)?|kya chal raha( hai)?)\b/g, ' how are you '],
+    [/\b(sasta|sasti|saste|sastaa)\b/g, ' cheap '],
+    [/\b(mehenga|mehnga|mahenga|mehngi|mehenge)\b/g, ' expensive '],
+    [/\b(chahiye|chaiye|chahie|chahiya)\b/g, ' need '],
+    [/\bke (liye|liya|lie)\b/g, ' for '],
+    [/(\d+(?:,\d+)*\s*k?)\s+(se kam|tak|ke andar|se neeche|se niche|ke niche|ke under|ke neeche)\b/g, ' under $1 '],
+    [/\b(kaunsa|konsa|kaun sa|kon sa|kaunsi|konsi|kaun si)\b/g, ' which '],
+    [/\b(dikhao|dikha do|batao|bata do|bataiye|dikhaiye)\b/g, ' show '],
+    [/\b(accha|acha|achha|achcha|badhiya|badiya|mast)\b/g, ' good '],
+    [/\b(kitne ka|kitne ki|kitna|kitne)\b/g, ' price '],
+    [/\baur\b/g, ' and '],
+    [/\b(bhai|bhaiya|yaar|yar|bro|dude|ji|plz|pls|please)\b/g, ' '],
+    [/\b(hai|hain|mujhe|mereko|mera|meri|koi|wala|wali|wale)\b/g, ' ']
+  ];
+
+  function normalizeMessage(message) {
+    var s = String(message == null ? '' : message);
+    if (s.length > 600) s = s.slice(0, 600);
+    // strip markup so formatting/code/links carry no signal: `code`, ```blocks```, [text](url), <tags>, bare urls
+    s = s.replace(/```[\s\S]*?```/g, ' ').replace(/`[^`]*`/g, ' ').replace(/\[([^\]]*)\]\([^)]*\)/g, ' $1 ')
+      .replace(/<[^>]*>/g, ' ').replace(/\b(?:https?|javascript|data|vbscript|file):\S*/gi, ' ').replace(/\bwww\.\S+/gi, ' ');
+    s = s.toLowerCase().replace(/[‘’ʼ']/g, '').replace(/\bv\/s\b/g, ' vs ');
+    s = s.replace(/[–—]/g, ' - ');
+    s = s.replace(/[^\x20-\x7e₹]+/g, ' ');           // emoji & other non-ascii (keeps ₹)
+    s = s.replace(/[!?;:"`~^*_=<>{}\[\]|\\@$%&()\/+]/g, ' ');
+    s = s.replace(/(\D)\.(\s|$)/g, '$1 $2');               // sentence dots (keeps 5.1, rs.)
+    s = s.replace(/\s+/g, ' ').trim();
+    HINGLISH.forEach(function (h) { s = s.replace(h[0], h[1]); });
+    return s.replace(/\s+/g, ' ').trim();
+  }
+  function wordTokens(s) { return s.split(/[^a-z0-9#]+/).filter(Boolean); }
+
+  // optimal-string-alignment distance (a transposition counts as one edit: "lapotp" -> "laptop")
+  function osa(a, b) {
+    var m = a.length, n = b.length, d = [], i, j;
+    if (Math.abs(m - n) > 2) return 3;
+    for (i = 0; i <= m; i++) { d[i] = [i]; }
+    for (j = 0; j <= n; j++) d[0][j] = j;
+    for (i = 1; i <= m; i++) for (j = 1; j <= n; j++) {
+      var c = a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + c);
+      if (i > 1 && j > 1 && a.charAt(i - 1) === b.charAt(j - 2) && a.charAt(i - 2) === b.charAt(j - 1)) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+    return d[m][n];
+  }
+  // chat-only spelling fixes for shopping words ("lapotp for gamng"); product-name tokens are left for findProducts()
+  var TYPO_VOCAB = ('laptop laptops phone phones smartphone smartphones tablet tablets earbuds headphones headphone headset headsets ' +
+    'speaker speakers monitor monitors smartwatch smartwatches gaming editing students student battery camera cheapest wireless ' +
+    'bluetooth recommend compare expensive premium budget earphones earphone earbud mobile mobiles notebook notebooks ultrabook ' +
+    'soundbar soundbars speakers').split(' ');
+  var TYPO_SKIP = new Set(('tables coming battle phase mentor gamer gamers games honey photo photos phonics spender speak cheaper pricier ' +
+    'costlier lighter heavier bigger larger smaller faster louder thinner better options others editor editors expense premiums budgets ' +
+    'student compares compared camera cameras monitoring speaking').split(' '));
+  var TYPO_CATEGORY_WORDS = new Set(('laptop laptops phone phones smartphone smartphones tablet tablets earbuds headphones headphone headset ' +
+    'headsets speaker speakers monitor monitors smartwatch smartwatches earphones earphone earbud mobile mobiles notebook notebooks ' +
+    'ultrabook soundbar soundbars').split(' '));
+  // common English words that sit one edit away from a shopping word ("table" -> "tablet") are never corrected
+  var TYPO_COMMON = new Set(('table cable label able stable fable gable sable tables cables labels phase phony phoned mentor monitored ' +
+    'speak speaks beaker heads header headed heading notice mobility comparing compared budge budged ' +
+    'premise premier gamine gaining gamin gamma editions edition edging camel cameo carmen').split(' '));
+
+  // Long messages: keep the most product-relevant sentence(s) instead of a truncated prefix.
+  function relevanceScore(text, products) {
+    var s = normalizeMessage(text);
+    if (!s) return 0;
+    var pq = parseQuery(s, products);
+    var sc = pq.categories.length * 3 + (pq.price_max != null || pq.price_min != null ? 2 : 0) + (pq.use_case ? 2 : 0) +
+      findProducts(s, products).length * 3 + (pq.need_anc || pq.need_wireless ? 1 : 0) + Object.keys(pq.boosts).length;
+    if (findUnknown(s, pq.categories.length > 0)) sc += 2;
+    return sc;
+  }
+  function focusLongMessage(raw, products) {
+    if (raw.length <= 600) return raw;
+    var parts = raw.replace(/([.!?\n;|])\s*/g, '$1\u0001').split('\u0001').map(function (x) { return x.trim(); }).filter(Boolean);
+    var chunks = [];
+    parts.forEach(function (p) {  // split run-on sentences into ~40-word windows
+      var w = p.split(/\s+/);
+      if (p.length <= 400) { chunks.push(p); return; }
+      for (var i = 0; i < w.length; i += 40) chunks.push(w.slice(i, i + 40).join(' '));
+    });
+    var scored = chunks.map(function (c, i) { return { c: c, i: i, s: relevanceScore(c, products) }; });
+    var hits = scored.filter(function (x) { return x.s > 0; });
+    if (!hits.length) return raw.slice(0, 600);
+    var best = hits.slice().sort(function (a, b) { return b.s - a.s || b.i - a.i; })[0];
+    // the best sentence, plus other relevant sentences while they fit (in original order)
+    var keep = hits.filter(function (x) { return x === best || x.s >= 2; }).sort(function (a, b) { return a.i - b.i; });
+    var out = [];
+    var len = 0;
+    keep.forEach(function (x) { if (x === best || len + x.c.length < 520 - best.c.length) { out.push(x); len += x.c.length; } });
+    return out.map(function (x) { return x.c; }).join(' ').slice(0, 600);
+  }
+  function correctTypos(ql, products, noCategoryTargets) {
+    var meta = catalogMeta(products);
+    return ql.split(' ').map(function (w) {
+      if (w.length < 5 || /[^a-z]/.test(w) || TYPO_SKIP.has(w) || TYPO_COMMON.has(w) || STOPWORDS.has(w) || meta.vocab.has(w) || meta.vocab.has(stem(w)) || TYPO_VOCAB.indexOf(w) !== -1) return w;
+      if (Object.keys(meta.tokCount).some(function (t) { return tokMatch(w, t) >= 0; }) || meta.brands[w]) return w;
+      var best = null, bd = 9;
+      TYPO_VOCAB.forEach(function (v) {
+        if (noCategoryTargets && TYPO_CATEGORY_WORDS.has(v)) return;  // an exact category word is already present: it wins
+        var allowed = Math.min(v.length, w.length) >= 7 ? 2 : 1;
+        var d = osa(w, v);
+        if (d <= allowed && d < bd) { bd = d; best = v; }
+      });
+      return best || w;
+    }).join(' ');
+  }
+
+  function lev(a, b) {
+    if (a === b) return 0;
+    var m = a.length, n = b.length, i, j;
+    if (Math.abs(m - n) > 2) return 3;
+    var prev = [], cur;
+    for (j = 0; j <= n; j++) prev[j] = j;
+    for (i = 1; i <= m; i++) {
+      cur = [i];
+      for (j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1));
+      prev = cur;
+    }
+    return prev[n];
+  }
+
+  // ---------------------------------------------------------------- catalog meta + fuzzy product names
+  var NAME_CAT_WORDS = new Set('phone tab watch buds pods band pad soundbar book'.split(' '));
+  var NAME_GENERIC = new Set('pro max air mini go lite ultra x plus'.split(' '));
+  // never pin a product from one of these words alone (common English / spec words)
+  var NAME_COMMON = new Set(('air pro max mini go lite ultra x plus smart home elite slim vision curve sport pulse trail arena strike ' +
+    'infinity sonic studio campus roam boom bass snap edge view calm echo aura tune fit run band buds pods phone tab watch pad oled ' +
+    'soundbar party slate fit').split(' '));
+  var NO_FUZZY = new Set(('laptop laptops notebook notebooks phone phones mobile mobiles tablet tablets ipad earbuds earphones headphones ' +
+    'headset headsets speaker speakers watch watches smartwatch monitor monitors display screen band bands buds under below above ' +
+    'cheap cheaper battery camera gaming editing coding students student travel price budget better best which about compare ' +
+    'with what have show more less light lighter want need good great any some does this that them they there their these those ' +
+    'other options option first second third tell about phone video music').split(' '));
+
+  var _meta = { ref: null, meta: null };
+  function catalogMeta(products) {
+    if (_meta.ref === products && _meta.meta) return _meta.meta;
+    var brands = {}, tokCount = {}, vocab = new Set(), byId = {};
+    products.forEach(function (p) {
+      byId[p.id] = p;
+      if (p.brand) brands[String(p.brand).toLowerCase()] = p.brand;
+      uniq(wordTokens(p.name.toLowerCase())).forEach(function (t) { tokCount[t] = (tokCount[t] || 0) + 1; });
+      tokenize(docText(p)).forEach(function (t) { vocab.add(t); });
+    });
+    var meta = { brands: brands, tokCount: tokCount, vocab: vocab, byId: byId };
+    _meta = { ref: products, meta: meta };
+    return meta;
+  }
+
+  function tokMatch(m, t) {
+    if (m === t) return 0;
+    if (NO_FUZZY.has(m) || STOPWORDS.has(m) || m.length < 4 || /\d/.test(m) || /\d/.test(t)) return -1;
+    var allowed = t.length >= 7 ? 2 : t.length >= 5 ? 1 : 0;
+    if (!allowed) return -1;
+    var d = lev(m, t);
+    return d <= allowed ? d : -1;
+  }
+
+  // Returns [{id, idx:[message token positions], fuzzy}] for products named in the message (exact, partial, typo).
+  function findProducts(ql, products) {
+    var meta = catalogMeta(products);
+    var mt = wordTokens(ql);
+    if (!mt.length) return [];
+    var cands = [];
+    products.forEach(function (p) {
+      var nt = wordTokens(p.name.toLowerCase());
+      var brand = String(p.brand || '').toLowerCase();
+      var matched = [], idx = [], fuzzy = false, firstPos = {};
+      nt.forEach(function (t, ti) {
+        for (var i = 0; i < mt.length; i++) {
+          var d = tokMatch(mt[i], t);
+          if (d < 0 || idx.indexOf(i) !== -1) continue;
+          matched.push(t); idx.push(i); firstPos[ti] = i; if (d > 0) fuzzy = true;
+          break;
+        }
+      });
+      if (!matched.length) return;
+      var isBrand = function (t) { return t === brand || !!meta.brands[t]; };
+      var distinct = matched.filter(function (t) { return !isBrand(t) && !NAME_CAT_WORDS.has(t) && !NAME_GENERIC.has(t) && !/^\d+$/.test(t); });
+      var nonBrandCat = matched.filter(function (t) { return !isBrand(t) && !NAME_CAT_WORDS.has(t) && !/^\d+$/.test(t); });
+      var all = matched.length === nt.length;
+      var prefix = nt.length >= 2 && firstPos[0] != null && firstPos[1] === firstPos[0] + 1 && nonBrandCat.length > 0;
+      var single = matched.length === 1 && !fuzzy && distinct.length === 1 && !NAME_COMMON.has(distinct[0]) &&
+        (meta.tokCount[distinct[0]] || 0) <= 2 && (distinct[0].length >= 5 || /\d/.test(distinct[0]));
+      var ok = (all && (matched.length >= 2 || single)) || (matched.length >= 2 && distinct.length > 0) || prefix || single;
+      if (!ok) return;
+      cands.push({ id: p.id, idx: idx, fuzzy: fuzzy, unmatched: nt.length - matched.length, pos: Math.min.apply(null, idx) });
+    });
+    // drop products whose matched tokens are a strict subset of another's ("nova phone 12" inside "nova phone 12 pro")
+    var kept = cands.filter(function (a) {
+      return !cands.some(function (b) {
+        if (a === b) return false;
+        var sub = a.idx.every(function (i) { return b.idx.indexOf(i) !== -1; });
+        if (!sub) return false;
+        if (b.idx.length > a.idx.length) return true;
+        return b.unmatched < a.unmatched; // same tokens: prefer the product with fewer unmatched name tokens
+      });
+    });
+    kept.sort(function (a, b) { return a.pos - b.pos; });
+    return kept;
+  }
+
+  function mentionedBrands(ql, products) {
+    var meta = catalogMeta(products);
+    return uniq(wordTokens(ql).filter(function (t) { return meta.brands[t]; }).map(function (t) { return meta.brands[t]; }));
+  }
+
+  // ---------------------------------------------------------------- unknown (not carried) products
+  var MODEL_TAIL = '(?:\\s+(?:\\d+[a-z]*|pro|max|plus|ultra|mini|air|lite|se|fold|flip|note|s\\d+|a\\d+|m\\d+|series))*';
+  var UNKNOWN_PRODUCTS = [
+    { re: 'i\\s?phones?', label: 'iPhone', cat: 'Smartphone', tier: 'premium' },
+    { re: 'ipads?', label: 'iPad', cat: 'Tablet', tier: 'premium' },
+    { re: 'mac\\s?books?|imacs?', label: 'MacBook', cat: 'Laptop', tier: 'premium' },
+    { re: 'air\\s?pods?', label: 'AirPods', cat: 'Earbuds', tier: 'premium' },
+    { re: 'apple watch(?:es)?', label: 'Apple Watch', cat: 'Smartwatch', tier: 'premium' },
+    { re: 'apple', label: 'Apple', cat: 'Smartphone', tier: 'premium' },
+    { re: 'galaxy\\s+(?:tab|book|buds|watch)\\w*', label: 'Samsung Galaxy', cat: null, tier: 'premium' },
+    { re: 'samsung|galaxy', label: 'Samsung Galaxy', cat: 'Smartphone', tier: 'premium' },
+    { re: 'google pixel|pixel', label: 'Google Pixel', cat: 'Smartphone', tier: 'premium' },
+    { re: 'one\\s?plus', label: 'OnePlus', cat: 'Smartphone', tier: 'mid' },
+    { re: 'xiaomi|redmi|realme|poco|oppo|vivo|iqoo|motorola|moto|nokia|honor|huawei|nothing phone|infinix|tecno|lava', label: null, cat: 'Smartphone', tier: 'budget' },
+    { re: 'ps5|ps4|playstation|xbox|nintendo(?: switch)?|steam deck', label: null, cat: 'Laptop', uc: 'gaming', tier: 'premium' },
+    { re: 'sony|bose|sennheiser|beats|skullcandy|jabra', label: null, cat: 'Headset', tier: 'premium' },
+    { re: 'jbl|marshall|harman kardon|bang olufsen|sonos', label: null, cat: 'Speaker', tier: 'premium' },
+    { re: 'boat|boult', label: null, cat: 'Earbuds', tier: 'budget' },
+    { re: 'dell|hp|lenovo|asus|acer|msi|thinkpad|chromebook|surface|razer|alienware|rog|legion|ideapad|vivobook|zenbook', label: null, cat: 'Laptop', tier: 'mid' },
+    { re: 'fitbit|garmin|amazfit|fire[\\s-]?boltt|noise colorfit|whoop', label: null, cat: 'Smartwatch', tier: 'mid' },
+    { re: 'kindle', label: 'Kindle', cat: 'Tablet', tier: 'budget' },
+    { re: 'alexa|echo dot|homepod|google home|nest mini|nest hub', label: null, cat: 'Speaker', tier: 'mid' },
+    { re: 'lg|benq|viewsonic', label: null, cat: 'Monitor', tier: 'mid' },
+    // generic product types we don't stock (only when the message names none of our categories)
+    { re: 'dslrs?|mirrorless|gopro|canon|nikon|camcorders?|cameras?', label: 'standalone cameras', cat: 'Smartphone', boost: 'camera', tier: 'premium', generic: true },
+    { re: 'tvs?|televisions?|smart tvs?', label: 'TVs', cat: 'Monitor', tier: 'premium', generic: true },
+    { re: 'printers?|routers?|projectors?|drones?|keyboards?|mouse|mice|chargers?|power\\s?banks?|cables?|pendrives?|hard dis[ck]s?|webcams?|consoles?', label: null, cat: null, tier: 'mid', generic: true, accessory: true }
+  ].map(function (u) { u.rx = new RegExp('\\b(?:' + u.re + ')\\b' + MODEL_TAIL); return u; });
+
+  function prettyUnknown(raw, u) {
+    var words = raw.trim().split(/\s+/);
+    if (u.label && !u.generic) {
+      var head = new RegExp('^(?:' + u.re + ')$');
+      var cut = 1;
+      for (var i = 1; i <= words.length; i++) if (head.test(words.slice(0, i).join(' '))) { cut = i; break; }
+      var tail = words.slice(cut).map(function (w) { return /^(pro|max|plus|ultra|mini|air|lite|fold|flip|note|series)$/.test(w) ? cap(w) : w.toUpperCase(); });
+      return [u.label].concat(tail).join(' ');
+    }
+    if (u.label) return u.label;
+    var special = { ps5: 'PS5', ps4: 'PS4', xbox: 'Xbox', jbl: 'JBL', hp: 'HP', lg: 'LG', msi: 'MSI', rog: 'ROG', benq: 'BenQ', iqoo: 'iQOO', oneplus: 'OnePlus' };
+    return words.map(function (w) { return special[w] || (/\d/.test(w) ? w.toUpperCase() : cap(w)); }).join(' ');
+  }
+
+  function findUnknown(ql, hasCategory) {
+    for (var i = 0; i < UNKNOWN_PRODUCTS.length; i++) {
+      var u = UNKNOWN_PRODUCTS[i];
+      if (u.generic && hasCategory) continue;
+      var m = ql.match(u.rx);
+      if (m) return { label: prettyUnknown(m[0], u), labelled: !!u.label && !u.generic, generic: !!u.generic, rx: u.rx, raw: m[0], cat: u.cat, uc: u.uc || null, boost: u.boost || null, tier: u.tier, accessory: !!u.accessory };
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------- intent patterns
+  var RX = {
+    smalltalk: /\bhow are (you|u)\b|\bhow r u\b|\bhows it going\b|\bhow is it going\b|\bhow (is|was) your day\b|\bwhats up\b|\bwassup\b|\bsup\b|\blol\b|\blmao\b|\brofl\b|\bha(ha)+\b|\bhe(he)+\b|\bjoke\b|\bfunny\b|\bbored\b|\blove you\b|\bmarry me\b|\byou(re| are) (so )?(smart|dumb|stupid|great|awesome|cool|funny|helpful|useless|the best)\b|\bgood bot\b|\bbad bot\b|\bnice to meet you\b|\bwhat is your favou?rite\b/,
+    joke: /\bjoke\b|\bmake me laugh\b|\bsomething funny\b|\bbored\b/,
+    greeting: /^(hi+|hello+|helo|hey+|heya|hiya|yo|namaste|namaskar|hola|howdy|greetings|good (morning|afternoon|evening|day)|hai)\b/,
+    thanks: /\b(thanks?|thank you|thx|tysm|ty|thanku|thankyou|shukriya|dhanyavad|appreciate it|much appreciated)\b|^(ok|okay|k|kk|cool|nice|great|awesome|perfect|got it|alright|fine|sure|hmm+|oh|wow|super|amazing|done)$/,
+    bye: /\b(bye+|goodbye|good bye|see you|see ya|cya|good night|ttyl|catch you later|thats all|that is all)\b/,
+    help: /\b(who are you|what are you|who made you|who built you|whats your name|what is your name|your name|what can you do|what do you do|help|how does this work|how do i use|what can i ask|are you (a )?(bot|robot|human|ai|real|chatgpt|person))\b/,
+    strongOff: /\bweather\b(?![\s-]*(proof|resist|seal))|\btemperature (today|outside)\b|\bcapital of\b|\bprime minister\b|\bpresident of\b|\bwho is the (president|pm|ceo|king|queen)\b|\bwrite (me )?(a |an )?(poem|story|essay|song|letter|haiku|limerick)\b|\bpoem\b|\bhaiku\b|\brecipe\b|\btranslate\b|\bhomework\b|\bmeaning of life\b|\bhoroscope\b|\bwho won\b|\bcricket score\b|\bipl\b|\bbitcoin\b|\bcrypto(currency)?\b|\bstock market\b|^(what is|whats|calculate|solve)\s+\d+\s*(plus|minus|times|x|\*|-|\+|divided by)\s*\d+/,
+    nonElec: /\b(fridges?|refrigerators?|washing machines?|washers?|dryers?|microwaves?|ovens?|air conditioners?|\bac\b|air coolers?|ceiling fans?|geysers?|vacuum( cleaners?)?|irons?|cars?|bikes?|motorbikes?|scooters?|bicycles?|cycles?|shoes?|sneakers?|clothes|clothing|shirts?|t-shirts?|jeans|dress(es)?|sarees?|food|pizzas?|burgers?|groceries|grocery|furniture|sofas?|beds?|mattress(es)?|chairs?|medicines?|books?|jewell?ery|perfumes?|cosmetics|makeup|toys?|flights? tickets?|hotels?|insurance|loans?|houses?|flats?|apartments?)\b/,
+    generalQ: /^(who|what|when|where|why|how|is|are|can|tell me)\b/,
+    wantSomething: /\b(buy|get|choose|pick|recommend|suggest|purchase|gift|need|want|looking|shopping|shop)\b/,
+    compare: /\bcompare\b|\bcomparison\b|\bvs\b|\bversus\b|\bdifference between\b|\bdifferences?\b|\bdiff\b|\bbetter than\b|\bwhich is better\b|\bor the\b/,
+    compareRef: /\b(them|these|those|both|the two|top two|top 2|first two|these two|those two|the 2|all three|each other)\b/,
+    overview: /\bwhat (all )?(do|can) (you|i) (sell|have|offer|stock|carry|buy|get)\b|\b(what|which) (products|categories|brands|items|things|stuff|gadgets)\b|\bcategor(y|ies)\b|\b(your|the|full) (catalog|catalogue|range|inventory|product list)\b|\bshow (me )?(everything|all products|all items|all categories|the catalog|your products)\b|\bwhat (all )?is (in stock|available)\b|\bwhat brands\b|\bwhich brands\b|\beverything you (have|sell)\b/,
+    list: /\b(what|which)\b[^?]*\b(do you have|have you got|do you sell|do you carry|are available|do you stock|do you offer|you got)\b|\bshow( me)?\b|\blist\b|\boptions\b|\bwhat are\b|\ball (the )?(laptops?|phones?|smartphones?|tablets?|earbuds|headsets?|headphones|smartwatch(es)?|watch(es)?|speakers?|monitors?)\b|\bdo you (sell|have|carry|stock)\b|\bbrowse\b|\brange of\b|\bany (laptops?|phones?|tablets?|earbuds|headsets?|headphones|watch(es)?|speakers?|monitors?)\b/,
+    cheapest: /\bcheapest\b|\blowest pric(e|ed)\b|\bleast expensive\b|\bmost affordable\b|\bbudget-?est\b|\bcheap(est)? one\b/,
+    priciest: /\bmost expensive\b|\bcostliest\b|\bpriciest\b|\bhighest pric(e|ed)\b|\btop[\s-]end\b|\bmost premium\b|\bflagship\b|\bmost costly\b/,
+    recWords: /\bbest\b|\brecommend|\bsuggest|\bshould i\b|\bgood\b|\bwhich\b|\bideal\b|\bperfect\b|\bright\b|\bworth\b|\bfor\b|\bwith\b|\bneed\b|\bwant\b|\blooking\b|\bunder\b|\bbelow\b/,
+    cheaper: /\bcheaper\b|\bless expensive\b|\blower (price|budget|cost)\b|\bmore affordable\b|\bcheap(er)? (one|option|alternative)s?\b|\bsomething cheap\b|\banything cheap\b|\bsave money\b|\btoo (expensive|costly|pricey)\b|\bover my budget\b|\bcheap\b/,
+    pricier: /\bmore expensive\b|\bpricier\b|\bcostlier\b|\bpremium\b|\bhigher[\s-]end\b|\bupgrade\b|\bmore powerful\b|\bbetter (one|option)s?\b|\bstep up\b|\bspend more\b|\bmore budget\b|\bhigher budget\b/,
+    more: /\bshow (me )?more\b|\bmore options\b|\bmore results\b|\bother (options|ones|choices|models)\b|\balternatives?\b|\banything else\b|\bsomething else\b|\bany others?\b|\bwhat else\b|\bnext (ones|options)\b|\bothers\b/,
+    refine: /^(what|how) about\b|^and\b|^also\b|^ok(ay)? (and|what about)\b|\bwhich (one )?(is|has|have|one|of them|of these)\b|\bwhich\s+\w+\s+(has|have|is)\b|\bwith (anc|noise|gps|wireless|bluetooth|more|better|good|longer|a bigger|bigger|a better)\b|\bwithout\b|\b(more|better|longer|bigger|best|most) (ram|memory|storage|battery|camera|display|screen|performance|gpu|graphics|sound|refresh)\b|\b(lighter|smaller|bigger|larger|faster|louder|thinner)\b|\bfor (gaming|editing|video|coding|programming|students?|college|travel|gym|running|work|office|kids)\b|\binstead\b|\bonly\b/,
+    detail: /\btell me (more|about)\b|\bmore (about|details|info)\b|\bdetails?\b|\bspecs?\b|\bspecifications?\b|\bfeatures?\b|\breview\b|\bdescribe\b|\binfo(rmation)?\b|\bworth it\b|\bany good\b|\bgood for\b|\bhow (good|much|long|heavy|big)\b|\bis it\b|\bdoes it\b|\bcan it\b|\bwill it\b|\bdo they\b|\bhas it\b|\bprice\b|\bcost\b/,
+    pronoun: /\b(it|its|this one|that one|this|that|the same|same one)\b/,
+    ordinal: /\b(?:the\s+)?(first|second|third|fourth|fifth|1st|2nd|3rd|4th|5th)\b(?:\s+(?:one|option|pick|product|item|model))?|#\s*([1-6])\b|\b(?:number|no|option|item|pick)\s*([1-6])\b|\b(top (?:one|pick|choice))\b|\b(best pick)\b|\b(runner[\s-]?up)\b|\b(the last (?:one|option|pick)|last one)\b/g,
+    gift: /\bgifts?\b|\bgifting\b|\bpresent for\b|\bbirthday\b|\banniversary\b|\bdiwali\b|\bchristmas\b/,
+    featureWords: /\b(battery|anc|noise|ram|memory|storage|ssd|gpu|graphics|camera|screen|display|refresh|hz|wireless|bluetooth|waterproof|water|gps|stylus|amoled|oled|4k|qhd|bass|mic|charging|processor|cpu|electronics?|gadgets?|devices?|tech)\b/
+  };
+
+  var ORD_IDX = { first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2, fourth: 3, '4th': 3, fifth: 4, '5th': 4 };
+  function ordinalRefs(ql) {
+    var out = [], m;
+    RX.ordinal.lastIndex = 0;
+    while ((m = RX.ordinal.exec(ql))) {
+      var i = null;
+      if (m[1]) i = ORD_IDX[m[1]];
+      else if (m[2]) i = parseInt(m[2], 10) - 1;
+      else if (m[3]) i = parseInt(m[3], 10) - 1;
+      else if (m[4] || m[5]) i = 0;
+      else if (m[6]) i = 1;
+      else if (m[7]) i = -1;
+      if (i != null && out.indexOf(i) === -1) out.push(i);
+    }
+    return out;
+  }
+
+  // converse-only boosts; plain run() queries never see these.
+  var EXTRA_BOOSTS = [
+    { key: 'ram', re: /\bram\b|\bmemory\b|\bmultitask/, w: 0.5 },
+    { key: 'storage', re: /\bstorage\b|\bspace\b|\bssd\b|\b[12]\s*tb\b/, w: 0.5 },
+    { key: 'screen', re: /\b(big|bigger|biggest|large|larger|largest|huge)\s+(screen|display)\b|\bscreen size\b|\bbigger\b|\blarger\b/, w: 0.5 },
+    { key: 'camera', re: /\bcamera\b|\bphotos?\b|\bphotograph|\bselfies?\b|\bmp\b/, w: 0.6 },
+    { key: 'weight', re: /\blighter\b|\blightest\b|\bweigh|\bthin(ner)?\b|\bportable\b|\bcarry around\b/, w: 0.4 },
+    { key: 'refresh', re: /\brefresh\b|\bhz\b|\bsmooth(er)?\b/, w: 0.5 },
+    { key: 'water', re: /\bwater\b|\bswim|\brain\b|\bshower\b|\bsplash/, w: 0.4 },
+    { key: 'battery', re: /\bbattery\b|\bbackup\b|\blasts? long/, w: 0.4 },
+    { key: 'cpu', re: /\bpowerful\b|\bperformance\b|\bfast(er|est)?\b|\bspeed\b|\bprocessor\b/, w: 0.3 },
+    { key: 'gpu', re: /\bpowerful\b|\bperformance\b|\bgraphics\b|\bgpu\b/, w: 0.3 },
+    { key: 'price', re: /\bcheap(er|est)?\b|\baffordable\b|\bvalue for money\b|\bbudget\b/, w: 0.4 }
+  ];
+  var SOFT_CATS = [
+    { re: /\bkids?\b|\bchild(ren)?\b|\btoddlers?\b|\bson\b|\bdaughter\b/, cats: ['Tablet'], kw: ['kid'] },
+    { re: /\bdraw(ing)?\b|\bsketch(ing)?\b|\bstylus\b|\bnote[\s-]?taking\b|\bhandwrit/, cats: ['Tablet'], kw: ['stylu'] },
+    { re: /\bphotograph|\bphotos?\b|\bselfies?\b/, cats: ['Smartphone'] },
+    { re: /\boffice\b|\bwork from home\b|\bwfh\b|\bzoom calls?\b|\bmeetings?\b|\bspreadsheets?\b|\bexcel\b/, cats: ['Laptop'], boosts: { ram: 0.3, battery: 0.3, weight: 0.2 } },
+    { re: /\bparty\b|\bkaraoke\b|\bdj\b/, cats: ['Speaker'], kw: ['karaoke'] },
+    { re: /\bmusic\b|\bsongs?\b|\bpodcasts?\b|\baudiobooks?\b/, cats: ['Headset', 'Earbuds'] },
+    { re: /\bmovies?\b|\bnetflix\b|\bbinge\b|\bstreaming\b|\breading\b|\bebooks?\b|\bcomics\b/, cats: ['Tablet'] },
+    { re: /\bheart[\s-]?rate\b|\bspo2\b|\bsleep track|\bstep count|\bsteps\b|\bfitness track/, cats: ['Smartwatch'] }
+  ];
+
+  var FOLLOW_STOP = new Set(('cheaper expensive costlier pricier option other else alternative alternatives more less lower higher show ' +
+    'first second third top two them which one ones lighter heavier bigger larger smaller premium better powerful anything something ' +
+    'instead only also okay ok and what about how else others next result results same ram memory battery storage camera gps screen display ' +
+    'anc noise lightest cheapest weight weigh good').split(' '));
+
+  // ---------------------------------------------------------------- plan helpers
+  function ucById(id) { for (var i = 0; i < USE_CASES.length; i++) if (USE_CASES[i].id === id) return USE_CASES[i]; return null; }
+  function recomputeWeights(plan) {
+    var w = {};
+    var uc = ucById(plan.use_case);
+    if (uc) Object.keys(uc.weights).forEach(function (k) { w[k] = uc.weights[k]; });
+    Object.keys(plan.boosts || {}).forEach(function (k) { w[k] = (w[k] || 0) + plan.boosts[k]; });
+    if (!Object.keys(w).length && plan.base_weights) Object.keys(plan.base_weights).forEach(function (k) { w[k] = plan.base_weights[k]; });
+    plan.weights = w;
+    return plan;
+  }
+
+  // "best phone under 50k" has no use case or boost: rank by an all-round quality profile instead of price only (chat layer only).
+  var DEFAULT_PROFILE = {
+    Laptop: { cpu: 0.3, ram: 0.3, gpu: 0.2, storage: 0.2 },
+    Smartphone: { camera: 0.3, ram: 0.25, refresh: 0.25, storage: 0.2 },
+    Tablet: { ram: 0.3, storage: 0.3, refresh: 0.2, battery: 0.2 },
+    Earbuds: { anc: 0.4, battery: 0.4, water: 0.2 },
+    Headset: { anc: 0.4, battery: 0.4, weight: 0.2 },
+    Smartwatch: { battery: 0.5, water: 0.5 },
+    Speaker: { battery: 0.5, water: 0.5 },
+    Monitor: { resolution: 0.35, refresh: 0.35, color: 0.3 }
+  };
+  function applyDefaultProfile(plan) {
+    if (!plan.categories || !plan.categories.length) return plan;
+    var w = {};
+    plan.categories.forEach(function (c) {
+      var d = DEFAULT_PROFILE[c] || {};
+      Object.keys(d).forEach(function (k) { w[k] = (w[k] || 0) + d[k] / plan.categories.length; });
+    });
+    plan.base_weights = w;
+    return recomputeWeights(plan);
+  }
+  // fitness/gym/running: smartwatches + sweat/water-proof sport earbuds only (never speakers, laptops...)
+  var FITNESS_CATS = ['Smartwatch', 'Earbuds'];
+  function applyFitnessScope(plan) {
+    var inter = (plan.categories || []).filter(function (c) { return FITNESS_CATS.indexOf(c) !== -1; });
+    plan.categories = inter.length ? inter : FITNESS_CATS.slice();
+    if (plan.categories.indexOf('Earbuds') !== -1) plan.sport_earbuds = true;
+    return plan;
+  }
+  function makePlan(o) {
+    o = o || {};
+    var uc = ucById(o.use_case);
+    return recomputeWeights({
+      categories: (o.categories || []).slice(), price_max: o.price_max == null ? null : o.price_max, price_min: o.price_min == null ? null : o.price_min,
+      use_case: uc ? uc.id : null, use_case_label: uc ? uc.label : null, need_wireless: !!o.need_wireless, need_anc: !!o.need_anc,
+      keywords: (o.keywords || []).slice(), pinned_ids: (o.pinned_ids || []).slice(), boosts: cloneJSON(o.boosts || {}), weights: {}
+    });
+  }
+  function addBoost(plan, key, w) { plan.boosts[key] = Math.max(plan.boosts[key] || 0, w); }
+
+  function augmentPlan(plan, ql, opts) {
+    opts = opts || {};
+    var changed = [];
+    EXTRA_BOOSTS.forEach(function (b) {
+      if (opts.skip && opts.skip.indexOf(b.key) !== -1) return;
+      if (b.key === 'price' && (plan.price_max != null || plan.boosts.price)) return;
+      if (b.key === 'battery' && plan.boosts.battery) return;
+      if (b.key === 'water' && plan.boosts.water) return;
+      if (b.key === 'weight' && plan.boosts.weight) return;
+      if (b.re.test(ql)) { addBoost(plan, b.key, b.w); changed.push(b.key); }
+    });
+    if (!plan.categories.length) {
+      for (var i = 0; i < SOFT_CATS.length; i++) {
+        var s = SOFT_CATS[i];
+        if (!s.re.test(ql)) continue;
+        plan.categories = s.cats.slice();
+        (s.kw || []).forEach(function (k) { if (plan.keywords.indexOf(k) === -1) plan.keywords.push(k); });
+        Object.keys(s.boosts || {}).forEach(function (k) { addBoost(plan, k, s.boosts[k]); });
+        plan.soft_category = true;
+        break;
+      }
+    }
+    recomputeWeights(plan);
+    return changed;
+  }
+
+  var BOOST_TEXT = { battery: 'long battery life', price: 'cheap', weight: 'lightweight', anc: 'anc', water: 'waterproof', ram: 'more RAM',
+    storage: 'more storage', screen: 'bigger screen', camera: 'great camera', refresh: 'high refresh rate', cpu: 'fast processor', gpu: 'strong graphics' };
+  var BOOST_LABEL = { battery: 'battery life', price: 'a lower price', weight: 'a lighter build', anc: 'noise cancellation', water: 'water resistance',
+    ram: 'more RAM', storage: 'more storage', screen: 'a bigger screen', camera: 'the camera', refresh: 'a high refresh rate', cpu: 'performance', gpu: 'graphics' };
+
+  function planToText(plan) {
+    var parts = [];
+    if (plan.need_wireless) parts.push('wireless');
+    if (plan.need_anc) parts.push('noise cancelling');
+    if (plan.need_gps) parts.push('GPS');
+    parts.push(plan.categories.length ? catsWordQ(plan.categories) : 'products');
+    if (plan.use_case) parts.push('for ' + UC_TEXT[plan.use_case]);
+    var b = Object.keys(plan.boosts || {}).filter(function (k) { return !(k === 'anc' && plan.need_anc); }).map(function (k) { return BOOST_TEXT[k]; }).filter(Boolean);
+    if (b.length) parts.push('with ' + b.join(', '));
+    var kw = (plan.keywords || []).filter(function (k) { return k.length > 2; });
+    if (kw.length) parts.push('(' + kw.join(' ') + ')');
+    if (plan.price_min != null && plan.price_max != null) parts.push('between ' + inr(plan.price_min) + ' and ' + inr(plan.price_max));
+    else if (plan.cheaper_than && plan.price_max === plan.cheaper_than.price) parts.push('cheaper than ' + plan.cheaper_than.name + ' (' + inr(plan.cheaper_than.price) + ')');
+    else if (plan.price_max != null) parts.push('under ' + inr(plan.price_max));
+    else if (plan.price_min != null) parts.push('above ' + inr(plan.price_min));
+    return parts.join(' ');
+  }
+  var UC_TEXT = { video_editing: 'video editing', gaming: 'gaming', coding: 'coding', student: 'students', travel: 'travel', workout: 'workouts' };
+
+  function runPlan(text, catalog, plan, stage, k) {
+    return run(text, catalog, { stage: stage, k: k || 5, plan: plan, stage1Catalog: 'full' });
+  }
+
+  // ---------------------------------------------------------------- card + formatting helpers
+  function specBits(p, n) { return String(p.specs || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean).slice(0, n || 3); }
+  function card(p, why, badge) {
+    var w = (why && why.length ? why : specBits(p, 3)).slice(0, 4);
+    return { id: p.id, name: p.name, category: p.category, price: p.price, specs: p.specs, why: w, badge: badge || '' };
+  }
+  function cardsFromResults(results, n, badges) {
+    return results.slice(0, n || 3).map(function (r, i) {
+      return card(r.product, r.why.filter(function (w) { return w !== 'Named in your question'; }), badges === false ? '' : (i === 0 ? 'Best pick' : i === 1 ? 'Runner-up' : ''));
+    });
+  }
+  function bullet(p) { return '- **' + p.name + '** — ' + inr(p.price) + ' — ' + specBits(p, 3).join(', ') + (p.in_stock === false ? ' _(out of stock)_' : ''); }
+
+  // ---------------------------------------------------------------- compare
+  function weightFmt(kg) { return kg < 1 ? Math.round(kg * 1000) + ' g' : kg + ' kg'; }
+  var CMP = {
+    cpu: { label: 'Processor', dir: 1, get: function (p) { return attr(p, 'cpu') ? cpuScore(attr(p, 'cpu')) : null; }, fmt: function (p) { return attr(p, 'cpu'); }, adv: 'a faster processor' },
+    ram: { label: 'RAM', dir: 1, get: function (p) { return attr(p, 'ram_gb'); }, fmt: function (p) { return attr(p, 'ram_gb') + 'GB'; }, adv: 'more RAM' },
+    gpu: { label: 'Graphics', dir: 1, get: function (p) { return p.category === 'Laptop' ? (attr(p, 'gpu_tier') || 0) : null; }, fmt: function (p) { return attr(p, 'gpu') || 'integrated'; }, adv: 'stronger graphics' },
+    storage: { label: 'Storage', dir: 1, get: function (p) { return attr(p, 'storage_gb'); }, fmt: function (p) { return storageLabel(attr(p, 'storage_gb')); }, adv: 'more storage' },
+    camera: { label: 'Main camera', dir: 1, get: function (p) { return specNum(p, /(\d+)\s*MP\b/i); }, fmt: function (p) { var v = specNum(p, /(\d+)\s*MP\b/i); return v ? v + 'MP' : (/triple camera/i.test(p.specs) ? 'triple camera' : 'n/a'); }, adv: 'a higher-resolution camera' },
+    mah: { label: 'Battery', dir: 1, get: function (p) { return specNum(p, /(\d+)\s*mAh/i); }, fmt: function (p) { return specNum(p, /(\d+)\s*mAh/i) + 'mAh'; }, adv: 'a bigger battery' },
+    battery: { label: 'Battery', dir: 1, get: function (p) { return attr(p, 'battery_hr'); }, fmt: function (p) { return ATTRS.battery.fmt(p).replace(' battery', ''); }, adv: 'longer battery life' },
+    refresh: { label: 'Refresh rate', dir: 1, get: function (p) { return attr(p, 'refresh_hz'); }, fmt: function (p) { return attr(p, 'refresh_hz') + 'Hz'; }, adv: 'a smoother high-refresh screen' },
+    screen: { label: 'Screen', dir: 1, get: function (p) { return attr(p, 'display_in'); }, fmt: function (p) { return attr(p, 'display_in') + '-inch'; }, adv: 'a bigger screen' },
+    weight: { label: 'Weight', dir: -1, get: function (p) { return attr(p, 'weight_kg'); }, fmt: function (p) { return weightFmt(attr(p, 'weight_kg')); }, adv: 'a lighter build' },
+    anc: { label: 'Noise cancellation', dir: 1, get: function (p) { var a = attr(p, 'anc'); return a == null ? null : (a ? 1 : 0); }, fmt: function (p) { return attr(p, 'anc') ? 'yes' : 'no'; }, adv: 'noise cancellation' },
+    water: { label: 'Water resistance', dir: 1, get: function (p) { return ATTRS.water.get(p); }, fmt: function (p) { return attr(p, 'water_resistance') || 'none'; }, adv: 'better water resistance' },
+    gps: { label: 'GPS', dir: 1, get: function (p) { var g = attr(p, 'gps'); return g == null ? null : (g ? 1 : 0); }, fmt: function (p) { return attr(p, 'gps') ? 'built-in' : 'no'; }, adv: 'built-in GPS' },
+    output: { label: 'Output', dir: 1, get: function (p) { return specNum(p, /(\d+)\s*W output/i); }, fmt: function (p) { return specNum(p, /(\d+)\s*W output/i) + 'W'; }, adv: 'more power and volume' },
+    resolution: { label: 'Resolution', dir: 1, get: function (p) { return resolutionScore(attr(p, 'resolution')); }, fmt: function (p) { return ATTRS.resolution.fmt(p); }, adv: 'a sharper resolution' },
+    panel: { label: 'Panel', dir: 1, get: function (p) { var v = { OLED: 3, IPS: 2, VA: 1 }[attr(p, 'panel')]; return v == null ? null : v; }, fmt: function (p) { return attr(p, 'panel'); }, adv: 'a better panel' },
+    color: { label: 'Colour', dir: 1, get: function (p) { return attr(p, 'color_gamut_srgb'); }, fmt: function (p) { return attr(p, 'color_gamut_srgb') + '% sRGB'; }, adv: 'more accurate colour' }
+  };
+  var CMP_KEYS = {
+    Laptop: ['cpu', 'ram', 'gpu', 'storage', 'refresh', 'battery', 'weight', 'screen'],
+    Smartphone: ['camera', 'ram', 'storage', 'mah', 'refresh', 'screen', 'weight'],
+    Tablet: ['cpu', 'ram', 'storage', 'screen', 'refresh', 'battery', 'weight'],
+    Earbuds: ['anc', 'battery', 'water'],
+    Headset: ['anc', 'battery', 'water', 'weight'],
+    Smartwatch: ['battery', 'gps', 'water', 'screen'],
+    Speaker: ['output', 'battery', 'water', 'weight'],
+    Monitor: ['screen', 'resolution', 'refresh', 'panel', 'color']
+  };
+
+  function cmpVal(key, p) { var v = CMP[key].get(p); return v == null || isNaN(v) ? null : v; }
+
+  function compareAnswer(a, b, useCase) {
+    var keys = CMP_KEYS[a.category] || [];
+    if (a.category !== b.category) keys = keys.filter(function (k) { return (CMP_KEYS[b.category] || []).indexOf(k) !== -1; });
+    var out = ['Here\'s how the **' + a.name + '** and the **' + b.name + '** compare:'];
+    if (a.category !== b.category) out[0] = 'The **' + a.name + '** is a ' + CAT_WORD[a.category] + ' and the **' + b.name + '** is a ' + CAT_WORD[b.category] + ', so here is what they share:';
+    var lines = ['- **Price:** ' + a.name + ' — ' + inr(a.price) + ' · ' + b.name + ' — ' + inr(b.price)];
+    var advA = [], advB = [];
+    keys.forEach(function (k) {
+      var va = cmpVal(k, a), vb = cmpVal(k, b);
+      if (va == null && vb == null) return;
+      var C = CMP[k];
+      var fa = va == null && k !== 'camera' ? 'n/a' : C.fmt(a), fb = vb == null && k !== 'camera' ? 'n/a' : C.fmt(b);
+      var note = '';
+      if (va != null && vb != null) {
+        if (va === vb) note = ' (same)';
+        else if ((va - vb) * C.dir > 0) advA.push(C.adv); else advB.push(C.adv);
+      }
+      lines.push('- **' + C.label + ':** ' + fa + ' vs ' + fb + note);
+    });
+    out.push(lines.join('\n'));
+    var diff = a.price - b.price; // >0: a dearer
+    var cheaper = diff > 0 ? b : diff < 0 ? a : null;
+    var save = Math.abs(diff);
+    var verdict;
+    var ucLine = '';
+    var uc = ucById(useCase);
+    if (uc && a.category === b.category) {
+      var prof = activeProfile(uc.weights, [a, b]);
+      if (prof.length) {
+        var sa = specScore(prof, a), sb = specScore(prof, b);
+        ucLine = sa !== sb ? ' For ' + uc.label + ', the **' + (sa > sb ? a.name : b.name) + '** is the better fit.'
+          : ' For ' + uc.label + ' they\'re evenly matched on the specs that matter (' + joinNatural(prof.slice(0, 3).map(function (x) { return ATTRS[x.key].label; })) + ').';
+      }
+    }
+    if (advA.length && advB.length) {
+      verdict = 'Pick the **' + a.name + '** if you want ' + joinNatural(advA.slice(0, 3)) + '; pick the **' + b.name + '** if you\'d rather have ' + joinNatural(advB.slice(0, 3)) +
+        (cheaper === b ? ' and save ' + inr(save) : cheaper === a ? ' (it costs ' + inr(save) + ' more)' : '') + '.';
+    } else if (advA.length || advB.length) {
+      var win = advA.length ? a : b, lose = advA.length ? b : a, adv = advA.length ? advA : advB;
+      if (cheaper === lose) verdict = 'The **' + win.name + '** is stronger on ' + joinNatural(adv.slice(0, 3)) + '; the **' + lose.name + '** only makes sense if you want to save ' + inr(save) + '.';
+      else verdict = 'The **' + win.name + '** wins outright — ' + joinNatural(adv.slice(0, 3)) + (cheaper === win ? ', and it\'s ' + inr(save) + ' cheaper' : ' at the same price') + '.';
+    } else {
+      verdict = cheaper ? 'They\'re evenly matched on the key specs, so the cheaper **' + cheaper.name + '** (' + inr(cheaper.price) + ') is the smarter buy.' : 'They\'re evenly matched on the key specs and price.';
+    }
+    out.push('**Verdict:** ' + verdict + ucLine);
+    return out.join('\n\n');
+  }
+
+  // which of a set wins on one attribute ("which is lighter?" after a compare)
+  var SUPERLATIVE = [
+    { key: 'weight', re: /\blight(er|est)?\b|\bweigh|\bheav(y|ier)\b|\bportable\b/ },
+    { key: 'price', re: /\bcheap(er|est)?\b|\baffordable\b|\bless expensive\b|\bvalue\b/, cmp: 'price' },
+    { key: 'battery', re: /\bbattery\b|\blasts? longer\b|\bbackup\b/ },
+    { key: 'ram', re: /\bram\b|\bmemory\b/ },
+    { key: 'storage', re: /\bstorage\b|\bspace\b|\bssd\b/ },
+    { key: 'camera', re: /\bcamera\b|\bphotos?\b|\bselfie/ },
+    { key: 'screen', re: /\bscreen\b|\bdisplay\b|\bbigger\b|\blarger\b/ },
+    { key: 'anc', re: /\banc\b|\bnoise\b/ },
+    { key: 'water', re: /\bwater|\bswim|\bsweat/ },
+    { key: 'gps', re: /\bgps\b/ },
+    { key: 'refresh', re: /\brefresh\b|\bhz\b|\bsmooth/ },
+    { key: 'gpu', re: /\bgraphics\b|\bgpu\b|\bgaming\b/ },
+    { key: 'cpu', re: /\bfast(er|est)?\b|\bpowerful\b|\bperformance\b|\bprocessor\b/ },
+    { key: 'output', re: /\blouder\b|\bloud\b|\bvolume\b|\bwatts?\b/ }
+  ];
+  function superlativeKey(ql) {
+    for (var i = 0; i < SUPERLATIVE.length; i++) if (SUPERLATIVE[i].re.test(ql)) return SUPERLATIVE[i].key;
+    return null;
+  }
+  function getForKey(key, p) {
+    if (key === 'price') return p.price;
+    if (key === 'battery' && p.category === 'Smartphone' && specNum(p, /(\d+)\s*mAh/i)) return specNum(p, /(\d+)\s*mAh/i);
+    return CMP[key] ? cmpVal(key, p) : null;
+  }
+  function fmtForKey(key, p) {
+    if (key === 'price') return inr(p.price);
+    if (key === 'battery' && p.category === 'Smartphone' && specNum(p, /(\d+)\s*mAh/i)) return CMP.mah.fmt(p);
+    return CMP[key].fmt(p);
+  }
+  var KEY_PHRASE = { weight: ['is lighter', 'is the lightest'], price: ['is cheaper', 'is the cheapest'], battery: ['has the better battery', 'has the best battery'],
+    ram: ['has more RAM', 'has the most RAM'], storage: ['has more storage', 'has the most storage'], camera: ['has the better camera', 'has the best camera'],
+    screen: ['has the bigger screen', 'has the biggest screen'], anc: ['has noise cancellation', 'has noise cancellation'], water: ['is more water-resistant', 'is the most water-resistant'],
+    gps: ['has GPS', 'has GPS'], refresh: ['has the smoother screen', 'has the smoothest screen'], gpu: ['has the stronger graphics', 'has the strongest graphics'],
+    cpu: ['is faster', 'is the fastest'], output: ['is louder', 'is the loudest'] };
+
+  function superlativeAnswer(key, items) {
+    var dir = key === 'price' || key === 'weight' ? -1 : 1;
+    var have = items.filter(function (p) { return getForKey(key, p) != null; });
+    if (!have.length) return null;
+    var sorted = have.slice().sort(function (x, y) { return (getForKey(key, y) - getForKey(key, x)) * dir; });
+    var best = sorted[0];
+    var two = items.length === 2;
+    var verb = KEY_PHRASE[key] ? KEY_PHRASE[key][two ? 0 : 1] : 'wins';
+    var tied = sorted.filter(function (p) { return getForKey(key, p) === getForKey(key, best); });
+    var vals = items.map(function (p) { return p.name + ' — ' + inr(p.price) + ': ' + (getForKey(key, p) == null ? 'n/a' : fmtForKey(key, p)); });
+    var head;
+    if (tied.length === items.length) head = 'They\'re the same here — ' + (key === 'anc' || key === 'gps' ? (getForKey(key, best) ? 'both have it.' : 'neither has it.') : 'both have ' + fmtForKey(key, best) + '.');
+    else if ((key === 'anc' || key === 'gps') && tied.length > 1) head = joinNatural(tied.map(function (p) { return '**' + p.name + '**'; })) + ' have it.';
+    else head = 'The **' + best.name + '** ' + verb + (key === 'price' ? ' at ' + inr(best.price) : ' (' + fmtForKey(key, best) + ')') + '.';
+    return { text: head + '\n\n' + vals.map(function (v) { return '- ' + v; }).join('\n'), best: best };
+  }
+
+  // ---------------------------------------------------------------- product question
+  function detectAttr(ql) {
+    if (/\banc\b|\bnoise\b/.test(ql)) return 'anc';
+    if (/\bcamera\b|\bphotos?\b|\bselfie|\bmp\b|\bmegapixel/.test(ql)) return 'camera';
+    if (/\bgps\b|\bnavigation\b|\bmaps\b/.test(ql)) return 'gps';
+    if (/\bwater|\bsweat|\bswim|\brain\b|\bip\s?\d\d|\bipx/.test(ql)) return 'water';
+    if (/\bram\b|\bmemory\b/.test(ql)) return 'ram';
+    if (/\bstorage\b|\bssd\b|\bspace\b/.test(ql)) return 'storage';
+    if (/\bbattery\b|\bbackup\b|\bcharge\b|\blast(s)? (long|how)/.test(ql)) return 'battery';
+    if (/\bgpu\b|\bgraphics\b|\brtx\b|\bgraphic card\b/.test(ql)) return 'gpu';
+    if (/\bprocessor\b|\bcpu\b|\bchip(set)?\b/.test(ql)) return 'cpu';
+    if (/\brefresh\b|\bhz\b/.test(ql)) return 'refresh';
+    if (/\bresolution\b|\b4k\b|\bqhd\b|\bfull hd\b|\b1080p?\b/.test(ql)) return 'resolution';
+    if (/\bscreen\b|\bdisplay\b|\binch(es)?\b|\bsize\b/.test(ql)) return 'screen';
+    if (/\bweigh|\bheavy\b|\blight(weight)?\b/.test(ql)) return 'weight';
+    if (/\bwireless\b|\bbluetooth\b/.test(ql)) return 'wireless';
+    if (/\bloud\b|\boutput\b|\bwatts?\b/.test(ql)) return 'output';
+    if (/\bin stock\b|\bavailab|\bstock\b/.test(ql)) return 'stock';
+    if (/\bprice\b|\bcost\b|\bhow much\b|\brate\b/.test(ql)) return 'price';
+    return null;
+  }
+  var ATTR_LABEL = { anc: 'noise cancellation', camera: 'a camera', gps: 'GPS', water: 'water resistance', ram: 'RAM', storage: 'storage', battery: 'battery',
+    gpu: 'graphics', cpu: 'processor', refresh: 'refresh rate', resolution: 'resolution', screen: 'screen', weight: 'weight', wireless: 'wireless', output: 'output' };
+
+  function rankInCategory(p, key, catalog) {
+    var dir = key === 'weight' || key === 'price' ? -1 : 1;
+    var same = catalog.filter(function (q) { return q.category === p.category && getForKey(key, q) != null; });
+    if (same.length < 3) return '';
+    same.sort(function (x, y) { return (getForKey(key, y) - getForKey(key, x)) * dir; });
+    var v = getForKey(key, p);
+    var rank = same.filter(function (q) { return (getForKey(key, q) - v) * dir > 0; }).length + 1;
+    var word = { weight: 'lightest', price: 'most affordable', battery: 'longest battery', ram: 'most RAM', storage: 'most storage', camera: 'highest-resolution camera',
+      screen: 'biggest screen', refresh: 'highest refresh rate', cpu: 'fastest processor', gpu: 'strongest graphics', output: 'loudest', resolution: 'sharpest', water: 'best water rating' }[key];
+    if (!word) return '';
+    if (rank === 1) return ' — the ' + word + ' of our ' + same.length + ' ' + CAT_PLURAL[p.category];
+    if (rank <= 3) return ' — #' + rank + ' for ' + word.replace(/^(most|longest|highest|biggest|fastest|strongest|loudest|sharpest|best|lightest)\s*/, function (m0) { return m0; }) + ' among our ' + CAT_PLURAL[p.category];
+    return '';
+  }
+
+  function useCaseVerdict(p, ucId, catalog) {
+    var uc = ucById(ucId);
+    var same = catalog.filter(function (q) { return q.category === p.category; });
+    var prof = activeProfile(uc.weights, same);
+    if (!prof.length || same.length < 2) return null;
+    var ranked = same.slice().sort(function (x, y) { return specScore(prof, y) - specScore(prof, x) || x.price - y.price; });
+    var rank = ranked.indexOf(p) + 1;
+    var best = ranked[0];
+    var keySpecs = prof.slice(0, 3).map(function (a) { return ATTRS[a.key].get(p) != null ? ATTRS[a.key].fmt(p) : null; }).filter(Boolean);
+    var s;
+    if (rank === 1) s = '**Yes** — it\'s our best ' + CAT_WORD[p.category] + ' for ' + uc.label + ' (' + joinNatural(keySpecs) + ').';
+    else if (rank <= Math.max(2, Math.ceil(same.length / 3))) s = '**Yes, it\'s a strong choice** for ' + uc.label + ' — #' + rank + ' of our ' + same.length + ' ' + CAT_PLURAL[p.category] + ' (' + joinNatural(keySpecs) + '). The top pick is the **' + best.name + '** (' + inr(best.price) + ').';
+    else s = '**It\'ll manage light ' + uc.label + '**, but it isn\'t built for it (' + joinNatural(keySpecs) + '). For ' + uc.label + ' the **' + best.name + '** (' + inr(best.price) + ') is a much better fit.';
+    return { text: s, best: best };
+  }
+
+  function productAnswer(p, ql, catalog, ucId) {
+    var key = detectAttr(ql);
+    var out = [];
+    var alt = null;
+    var stock = p.in_stock === false ? ' It\'s currently **out of stock**.' : '';
+    function closestWith(pred) {
+      return catalog.filter(function (q) { return q.id !== p.id && q.category === p.category && pred(q); })
+        .sort(function (x, y) { return Math.abs(x.price - p.price) - Math.abs(y.price - p.price); })[0] || null;
+    }
+    if (ucId && !key) {
+      var v = useCaseVerdict(p, ucId, catalog);
+      if (v) { out.push('**' + p.name + '** — ' + inr(p.price) + '. ' + v.text); out.push('Specs: ' + p.specs + '.' + stock); if (v.best.id !== p.id) alt = v.best; return { text: out.join('\n\n'), alt: alt }; }
+    }
+    if (key === 'price') {
+      out.push('The **' + p.name + '** costs **' + inr(p.price) + '**' + rankInCategory(p, 'price', catalog) + '.' + (p.in_stock === false ? ' It\'s currently out of stock.' : ' It\'s in stock.'));
+      out.push('Specs: ' + p.specs + '.');
+    } else if (key === 'stock') {
+      out.push(p.in_stock === false ? 'Sorry — the **' + p.name + '** (' + inr(p.price) + ') is **out of stock** right now.' : 'Yes — the **' + p.name + '** (' + inr(p.price) + ') is **in stock**.');
+    } else if (key === 'anc' || key === 'gps' || key === 'wireless') {
+      var field = key === 'wireless' ? 'wireless' : key;
+      var has = attr(p, field);
+      var detail = specBits(p, 6).filter(function (s) { return new RegExp(key === 'anc' ? 'anc' : key === 'gps' ? 'gps' : 'bluetooth|wireless|wi-fi', 'i').test(s); })[0];
+      if (has === true || (has == null && detail)) out.push('**Yes** — the **' + p.name + '** (' + inr(p.price) + ') has ' + (detail ? '**' + detail + '**' : ATTR_LABEL[key]) + '.');
+      else if (has === false) {
+        out.push('**No** — the **' + p.name + '** (' + inr(p.price) + ') doesn\'t have ' + ATTR_LABEL[key] + '.');
+        alt = closestWith(function (q) { return attr(q, field) === true; });
+        if (alt) out.push('If you need it, the closest option is the **' + alt.name + '** (' + inr(alt.price) + ') — ' + specBits(alt, 3).join(', ') + '.');
+      } else out.push('That doesn\'t apply to the **' + p.name + '** (' + inr(p.price) + ') — it\'s a ' + CAT_WORD[p.category] + '. Its specs: ' + p.specs + '.');
+      if (has != null || detail) out.push('Full specs: ' + p.specs + '.' + stock);
+    } else if (key === 'camera' && p.category !== 'Smartphone') {
+      out.push('The **' + p.name + '** (' + inr(p.price) + ') doesn\'t have a camera listed — it\'s a ' + CAT_WORD[p.category] + '. Specs: ' + p.specs + '.');
+    } else if (key && (getForKey(key, p) != null || (key === 'camera'))) {
+      var val = key === 'camera' ? CMP.camera.fmt(p) : key === 'water' ? (attr(p, 'water_resistance') ? attr(p, 'water_resistance') + ' water resistance' : 'no water-resistance rating')
+        : key === 'gpu' ? ATTRS.gpu.fmt(p) : key === 'cpu' ? attr(p, 'cpu') + ' processor' : key === 'battery' ? (p.category === 'Smartphone' && specNum(p, /(\d+)\s*mAh/i) ? CMP.mah.fmt(p) + ' battery' : ATTRS.battery.fmt(p))
+        : key === 'screen' ? attr(p, 'display_in') + '-inch display' : key === 'weight' ? weightFmt(attr(p, 'weight_kg')) : key === 'refresh' ? attr(p, 'refresh_hz') + 'Hz refresh rate'
+        : key === 'resolution' ? ATTRS.resolution.fmt(p) + ' resolution' : key === 'ram' ? attr(p, 'ram_gb') + 'GB RAM' : key === 'storage' ? CMP.storage.fmt(p) + ' storage' : CMP[key].fmt(p);
+      out.push('The **' + p.name + '** (' + inr(p.price) + ') has **' + val + '**' + rankInCategory(p, key, catalog) + '.');
+      if (key === 'water' && !attr(p, 'water_resistance')) {
+        alt = closestWith(function (q) { return !!attr(q, 'water_resistance'); });
+        if (alt) out.push('Need water resistance? The **' + alt.name + '** (' + inr(alt.price) + ') is rated ' + attr(alt, 'water_resistance') + '.');
+      }
+      if (ucId) { var v2 = useCaseVerdict(p, ucId, catalog); if (v2) out.push(v2.text); }
+      out.push('Full specs: ' + p.specs + '.' + stock);
+    } else if (key) {
+      out.push('I don\'t have ' + ATTR_LABEL[key] + ' details listed for the **' + p.name + '** (' + inr(p.price) + '). Here\'s what we do list: ' + p.specs + '.');
+    } else {
+      out.push('**' + p.name + '** — ' + inr(p.price) + (p.in_stock === false ? ' (out of stock)' : '') + '. ' + p.description);
+      out.push('**Key specs:** ' + p.specs + '.');
+      var same = catalog.filter(function (q) { return q.category === p.category; }).sort(function (x, y) { return x.price - y.price; });
+      if (same.length > 2) out.push('It sits at #' + (same.indexOf(p) + 1) + ' of ' + same.length + ' in our ' + CAT_PLURAL[p.category] + ' by price (' + inr(same[0].price) + '–' + inr(same[same.length - 1].price) + ').');
+    }
+    return { text: out.join('\n\n'), alt: alt };
+  }
+
+  // ---------------------------------------------------------------- canned answers
+  var EXAMPLES = ['Laptop for video editing under ₹70,000', 'Wireless headphones under ₹10,000', 'What do you sell?'];
+  var GLOSSARY = {
+    'anc|noise cancell?(ing|ation)|active noise cancell?(ing|ation)': ['**ANC (active noise cancellation)** uses microphones to listen to outside noise and plays an inverted sound wave to cancel it — great for flights, commutes and open offices. Many of our earbuds and headsets have it.', ['Earbuds with ANC under ₹5,000', 'Headphones with ANC', 'Which earbuds have the longest battery life?']],
+    'oled|amoled': ['**OLED / AMOLED** screens light each pixel individually, so you get true blacks, high contrast and vivid colours (AMOLED is the variant used in phones and watches).', ['Phones with AMOLED under ₹30,000', 'Best monitor for gaming', 'What do you sell?']],
+    'ltpo': ['**LTPO** is a display technology that lets the refresh rate drop as low as 1Hz when nothing moves, saving battery while still scrolling at 120Hz.', ['Best phone for camera', 'Phones under ₹40,000', 'What do you sell?']],
+    'refresh rate|hz|high refresh rate': ['**Refresh rate (Hz)** is how many times per second the screen redraws. 60Hz is standard; 120–240Hz feels much smoother for scrolling and gaming.', ['Monitor for gaming', 'Gaming laptop under ₹1,00,000', 'Phones with 120Hz under ₹30,000']],
+    'ip ?rating|ip ?\\d\\d|ipx ?\\d|water resistance|atm|5atm|10atm': ['**IP / ATM ratings** describe dust and water protection. IPX4 = splash/sweat proof, IP67/IP68 = survives dunking, 5ATM/10ATM = fine for swimming.', ['Waterproof speaker', 'Earbuds for gym', 'Best smartwatch for running']],
+    'ssd': ['An **SSD** is fast flash storage — it makes a laptop boot, open apps and load files far quicker than an old hard drive. All our laptops use SSDs.', ['Laptop with 1TB SSD', 'Laptop for students', 'What do you sell?']],
+    'ram|memory': ['**RAM** is a device\'s short-term working memory — more RAM lets you keep more apps and browser tabs open smoothly. 8GB is fine for everyday use; 16GB+ is better for coding, editing and gaming.', ['Laptop with 16GB RAM under ₹70,000', 'Does the NovaBook Air have enough RAM for coding?', 'Phones with 12GB RAM']],
+    'gpu|graphics card|rtx': ['A **GPU** (graphics card) handles graphics and video. A dedicated one like an RTX 4050/4060 makes gaming and video exports much faster than integrated graphics.', ['Gaming laptop under ₹1,00,000', 'Laptop for video editing under ₹70,000', 'Compare Zentra Vision 15 and Pixelon Blaze 15']],
+    'ldac|spatial audio|multipoint|dolby atmos': ['These are audio features: **LDAC** streams hi-res Bluetooth audio, **spatial audio** creates a surround effect, **multipoint** pairs two devices at once and **Dolby Atmos** is immersive surround sound.', ['Earbuds with ANC', 'Best speaker', 'What do you sell?']],
+    'qhd|4k|full hd|fhd|resolution': ['**Resolution** is the number of pixels: Full HD = 1920×1080, QHD = 2560×1440, 4K = 3840×2160. Higher means sharper text and more workspace.', ['Best monitor for video editing', 'Monitor for gaming', 'Cheapest monitor']]
+  };
+  var JOKES = [
+    'Why did the laptop go to the doctor? It had a bad case of the *bytes*. (Ours come with healthy SSDs, promise.)',
+    'My phone and I have a lot in common — we both hit 1% by evening. That\'s why the **Arcwave Max 10** packs a 6000mAh battery.',
+    'I told my monitor a joke. It didn\'t laugh, but it did *refresh* — 165 times a second.',
+    'Why don\'t wireless earbuds ever argue? They hate getting *tangled up* in things.'
+  ];
+  function catalogSummary(catalog) {
+    var cats = CATEGORIES.filter(function (c) { return catalog.some(function (p) { return p.category === c; }); });
+    return { cats: cats, text: joinNatural(cats.map(function (c) { return CAT_PLURAL[c]; })) };
+  }
+  function overviewAnswer(catalog) {
+    var sum = catalogSummary(catalog);
+    var lines = sum.cats.map(function (c) {
+      var ps = catalog.filter(function (p) { return p.category === c; });
+      var prices = ps.map(function (p) { return p.price; });
+      return '- **' + CAT_TITLE[c] + '** — ' + ps.length + ' model' + (ps.length === 1 ? '' : 's') + ', ' + inr(Math.min.apply(null, prices)) + ' to ' + inr(Math.max.apply(null, prices));
+    });
+    var brands = uniq(catalog.map(function (p) { return p.brand; }).filter(Boolean));
+    return 'TechMart carries **' + catalog.length + ' products** across ' + sum.cats.length + ' categories:\n\n' + lines.join('\n') +
+      (brands.length ? '\n\nBrands: ' + brands.join(', ') + '.' : '') + '\n\nTell me a category, a budget or what you\'ll use it for and I\'ll pick the best match.';
+  }
+
+  // ---------------------------------------------------------------- suggestions
+  var CAT_THIRD = { Laptop: 'Which has the best battery?', Smartphone: 'Which has the best camera?', Tablet: 'Which has the most storage?',
+    Earbuds: 'Which has ANC?', Headset: 'Which has ANC?', Smartwatch: 'Which has GPS?', Speaker: 'Which is waterproof?', Monitor: 'Which is best for gaming?' };
+  function suggestFor(kind, ctx) {
+    ctx = ctx || {};
+    var cat = ctx.cats && ctx.cats.length ? ctx.cats[0] : null;
+    var catPl = ctx.cats && ctx.cats.length ? catsNoun(ctx.cats) : 'laptops';
+    var third = cat ? CAT_THIRD[cat] : 'Which has the best battery?';
+    if ((cat === 'Earbuds' || cat === 'Headset') && ctx.plan && ctx.plan.need_anc) third = 'Which has the best battery?';
+    if (cat === 'Laptop' && ctx.plan && ctx.plan.boosts && ctx.plan.boosts.battery) third = 'Which is lightest?';
+    var s;
+    switch (kind) {
+      case 'recommendation':
+        s = ctx.count > 1 ? ['Anything cheaper?', 'Compare the top two', third] : ['Tell me more about it', 'Show more ' + catPl, 'Anything cheaper?'];
+        break;
+      case 'list':
+        s = ctx.count > 1 ? ['Compare the top two', 'Tell me more about the first one', ctx.cheapest ? 'Show the most expensive ' + catPl : 'Cheapest ' + (cat ? CAT_WORD[cat] : 'option')] : ['Tell me more about it', 'Anything cheaper?', 'What do you sell?'];
+        break;
+      case 'product_question':
+        s = ['Anything cheaper?', ctx.alt ? 'Compare with ' + ctx.alt.name : 'Show similar ' + catPl, cat && CAT_THIRD[cat] && cat !== 'Laptop' ? 'Show all ' + catPl : 'Is it good for gaming?'];
+        if (ctx.product && ctx.product.category === 'Laptop') s[2] = ctx.uc === 'gaming' ? 'Is it good for video editing?' : 'Is it good for gaming?';
+        break;
+      case 'compare':
+        s = ['Tell me more about the first one', cat === 'Laptop' || cat === 'Headset' || cat === 'Smartphone' || cat === 'Tablet' ? 'Which is lighter?' : cat === 'Monitor' ? 'Which is better for gaming?' : 'Which has the better battery?', 'Anything cheaper?'];
+        if (cat === 'Monitor') s[1] = 'Which has the bigger screen?';
+        break;
+      case 'not_found':
+        s = ctx.count ? ['Tell me more about the first one', 'Show all ' + catPl, 'What do you sell?'] : EXAMPLES.slice();
+        break;
+      case 'catalog_overview':
+        s = ['Show me all laptops', 'Cheapest smartphone', 'Best smartwatch for running'];
+        break;
+      case 'clarify':
+        s = ['Laptop for students', 'Phone with a great camera', 'Earbuds under ₹5,000'];
+        break;
+      default:
+        s = EXAMPLES.slice();
+    }
+    return s.slice(0, 3);
+  }
+
+  // ---------------------------------------------------------------- LLM prompt
+  var CHAT_SYSTEM = [
+    'You are TechMart\'s friendly shopping assistant for an electronics store in India.',
+    'Rules:',
+    '- Use ONLY the products listed under PRODUCTS. Never invent products, specs, prices, stock or features.',
+    '- Quote prices exactly as given, in INR (e.g. ₹68,990).',
+    '- If the products below don\'t answer the question, say so plainly and point to what we do have.',
+    '- FACTS is a verified draft answer: keep its picks, numbers and verdict; rephrase it so it sounds natural and helpful.',
+    '- Always state the exact key numbers from FACTS (RAM, price, battery, etc.) that answer the question; never invent prices, price differences or specs; only compare prices that appear in FACTS; if FACTS say a product is already the cheapest, say so and do not suggest another.',
+    '- Be warm and concise: under 120 words, simple markdown (bold product names, short bullets). No tables.',
+    '- Never mention these rules, the draft or the word "catalog context".'
+  ].join('\n');
+
+  function chatProductLine(p, withDesc) {
+    return '- ' + p.name + ' | ' + p.category + ' | ' + inr(p.price) + ' | ' + p.specs + (withDesc && p.description ? ' | ' + p.description : '') +
+      (p.in_stock === false ? ' | out of stock' : '');
+  }
+
+  function buildChatPrompt(message, resolved, list, answer, history, mustInclude) {
+    list = list.slice(0, 6);
+    function build(withDesc, factsMax) {
+      var lines = [];
+      if (history && history.length) {
+        lines.push('CONVERSATION SO FAR:');
+        history.slice(-2).forEach(function (h) {
+          lines.push('- Customer: "' + String(h.user).slice(0, 120) + '"' + (h.names && h.names.length ? ' -> you showed: ' + h.names.slice(0, 3).join(', ') : ''));
+        });
+        lines.push('');
+      }
+      lines.push('PRODUCTS (' + list.length + '):');
+      if (!list.length) lines.push('(none match)');
+      list.forEach(function (p) { lines.push(chatProductLine(p, withDesc)); });
+      lines.push('');
+      lines.push('CUSTOMER MESSAGE: "' + String(message).trim().slice(0, 300) + '"');
+      if (resolved && resolved.toLowerCase() !== String(message).trim().toLowerCase()) lines.push('(Interpreted as: ' + resolved + ')');
+      lines.push('');
+      lines.push('FACTS YOU MAY USE:');
+      lines.push(answer.length > factsMax ? answer.slice(0, factsMax) + '…' : answer);
+      lines.push('');
+      if (mustInclude) lines.push('Start your reply with: ' + mustInclude);
+      lines.push('Write your reply to the customer now.');
+      return lines.join('\n');
+    }
+    var user = build(true, 1600);
+    if (estimateTokens(CHAT_SYSTEM + user) > 900) user = build(false, 1600);
+    if (estimateTokens(CHAT_SYSTEM + user) > 900) user = build(false, 900);
+    return { system: CHAT_SYSTEM, user: user };
+  }
+
+  var NO_LLM_RE = /already the most affordable match|^None of our |^Sorry — none of our |^Nothing in our catalog fits|Nothing in our catalog matches \*\*[^*]+\*\* exactly|^That's everything we have/m;
+  // numbers stated in the answer's first sentence ("8GB", "₹52,000", "10hr", "IP68") for product questions
+  function factNumbers(answer) {
+    // first sentence that states numbers ("**Yes, for everyday coding.** The NovaBook Air 14 (₹52,000) has 8GB RAM…" -> 2nd sentence)
+    var re = /₹[\d,]+|\bIP[X\d]\d\b|\b\d+ATM\b|\b\d+(?:\.\d+)?\s?(?:GB|TB|MP|mAh|Hz|hr|-day|-inch|kg|g|W|% sRGB)(?![A-Za-z])/g;
+    var sentences = String(answer).replace(/\*\*/g, '').split('\n')[0].replace(/([.!?])\s+(?=[A-Z])/g, '$1\u0001').split('\u0001');
+    var m = [];
+    for (var i = 0; i < sentences.length && !m.length; i++) m = sentences[i].match(re) || [];
+    return uniq(m.map(function (x) { return x.replace(/\s+(?=GB|TB|MP|mAh|Hz|hr|kg|g\b|W)/, ''); }));
+  }
+
+  // ---------------------------------------------------------------- converse()
+  /**
+   * converse(message, products, state, {stage, k}) -> {kind, needs_llm, answer, products, suggestions, run, llm, resolved_query, state}
+   */
+  function converse(message, products, state, opts) {
+    opts = opts || {};
+    var stage = Number(opts.stage) || 3;
+    var k = opts.k || 5;
+    var all = Array.isArray(products) ? products : [];
+    var catalog = all;
+    if (stage === 1) {
+      var starter = all.filter(function (p) { return STARTER_IDS.indexOf(p.id) !== -1; });
+      if (starter.length) catalog = starter;
+    }
+    state = state && typeof state === 'object' ? state : null;
+    var raw = String(message == null ? '' : message);
+    var meta = catalogMeta(catalog);
+    raw = focusLongMessage(raw, catalog);
+    var ql0 = normalizeMessage(raw);
+    var ql = correctTypos(ql0, catalog, parseQuery(ql0, catalog).categories.length > 0);
+    var lastIds = state && Array.isArray(state.last_ids) ? state.last_ids.filter(function (id) { return meta.byId[id]; }) : [];
+    var lastPlan = state && state.last_plan ? state.last_plan : null;
+    var lastProducts = lastIds.map(function (id) { return meta.byId[id]; });
+
+    var res = { kind: 'clarify', needs_llm: false, answer: '', products: [], suggestions: [], run: null, llm: null, resolved_query: ql,
+      must_include: null, facts_numbers: [], state: null };
+    var ctx = {};
+    var planForState = null, idsForState = null;
+    var listForPrompt = [];
+
+    function finish() {
+      if (!res.answer) res.answer = 'Sorry, I didn\'t catch that. What are you shopping for?';
+      if (!res.suggestions.length) res.suggestions = suggestFor(res.kind, ctx);
+      var retrievalKinds = ['product_question', 'recommendation', 'list', 'compare', 'not_found'];
+      res.needs_llm = retrievalKinds.indexOf(res.kind) !== -1 && res.products.length > 0;
+      // deterministic "nothing cheaper / nothing matches" answers go out as-is: a small model invents products here
+      if (res.needs_llm && NO_LLM_RE.test(res.answer)) res.needs_llm = false;
+      var mi = res.answer.match(/^Sorry, we don't carry[^\n]*?[.:](?=\s|$)/);
+      res.must_include = mi ? mi[0] : null;
+      res.facts_numbers = res.kind === 'product_question' ? factNumbers(res.answer) : [];
+      var hist = (state && Array.isArray(state.history) ? state.history.slice(-1) : []);
+      if (res.needs_llm) {
+        var pl = listForPrompt.length ? listForPrompt : res.products.map(function (c) { return meta.byId[c.id]; }).filter(Boolean);
+        res.llm = buildChatPrompt(raw, res.resolved_query, pl, res.answer, hist, res.must_include);
+      }
+      var isRetrieval = retrievalKinds.indexOf(res.kind) !== -1;
+      var newIds = idsForState || res.products.map(function (c) { return c.id; });
+      res.state = {
+        turn: (state && Number(state.turn) > 0 ? Math.floor(Number(state.turn)) : 0) + 1,
+        last_query: isRetrieval ? res.resolved_query : (state ? state.last_query || '' : ''),
+        last_plan: isRetrieval && planForState ? cloneJSON(planForState) : (lastPlan ? cloneJSON(lastPlan) : null),
+        last_ids: isRetrieval && newIds.length ? newIds.slice(0, 6) : lastIds.slice(),
+        last_kind: res.kind,
+        history: hist.concat([{ user: raw.slice(0, 200), resolved: res.resolved_query, kind: res.kind, names: res.products.map(function (c) { return c.name; }) }]).slice(-2)
+      };
+      return res;
+    }
+
+    // ---- empty / whitespace
+    if (!ql || !/[a-z0-9]/.test(ql)) {
+      res.kind = 'clarify';
+      res.answer = 'Ask me anything about TechMart\'s ' + catalogSummary(catalog).text + ' — for example *"best phone for camera"* or *"compare Zentra Vision 15 and Pixelon Slim 14"*.';
+      return finish();
+    }
+
+    var cur = parseQuery(ql, catalog);
+    var pins = findProducts(ql, catalog);
+    var pinIds = pins.map(function (x) { return x.id; });
+    var cats = cur.categories.slice();
+    var unknown = findUnknown(ql, cats.length > 0);
+    var brands = mentionedBrands(ql, catalog);
+    var ords = ordinalRefs(ql);
+    var hasPrice = cur.price_max != null || cur.price_min != null;
+    // catalog words that count as a shopping signal (single letters like the "x" of "Arena X" never do)
+    var kwKnown = cur.keywords.filter(function (t) { return t.length >= 3 && meta.vocab.has(t) && !FOLLOW_STOP.has(t); });
+    var isCompare = RX.compare.test(ql) || (pins.length >= 2 && /\bor\b/.test(ql));
+    var hasState = !!(lastPlan || lastIds.length);
+    var signals = !!(cats.length || pins.length || unknown || cur.use_case || hasPrice || cur.need_anc || cur.need_wireless || Object.keys(cur.boosts).length ||
+      brands.length || RX.featureWords.test(ql) || RX.overview.test(ql) || isCompare || RX.cheapest.test(ql) || RX.priciest.test(ql) ||
+      (hasState && (RX.cheaper.test(ql) || RX.pricier.test(ql) || RX.more.test(ql) || RX.refine.test(ql) || ords.length || (RX.pronoun.test(ql) && RX.detail.test(ql)) || RX.compareRef.test(ql))));
+    var tokCount = wordTokens(ql).length;
+
+    // ---- creative / general-knowledge requests: always off-topic
+    if (RX.strongOff.test(ql) && !pins.length && !(cats.length && !/\bpoem|\bhaiku|\bstory|\bessay|\bsong\b/.test(ql))) {
+      res.kind = 'off_topic';
+      var topic = /weather|temperature/.test(ql) ? 'the weather' : /poem|haiku|story|essay|song|letter|limerick/.test(ql) ? 'creative writing' :
+        /capital|president|prime minister|who is the/.test(ql) ? 'general-knowledge questions' : /cricket|ipl|who won/.test(ql) ? 'sports scores' :
+        /bitcoin|crypto|stock market/.test(ql) ? 'markets or investing' : /recipe/.test(ql) ? 'recipes' : /\d/.test(ql) ? 'maths' : 'that';
+      res.answer = 'I\'m TechMart\'s shopping assistant, so I can\'t help with ' + topic + ' — but I\'d love to help you find the right gadget. We carry ' + catalogSummary(catalog).text + '.';
+      return finish();
+    }
+
+    // ---- "what is ANC?" style jargon questions -> short definition
+    var gm = !pins.length && !cats.length && ql.match(/^(?:what is|whats|what does|what do you mean by|define|meaning of|explain)\s+(?:an?\s+|the\s+)?([a-z0-9 -]+?)(?:\s+mean|\s+means|\s+stand for)?$/);
+    if (gm) {
+      var gKey = Object.keys(GLOSSARY).filter(function (g) { return new RegExp('^(?:' + g + ')$').test(gm[1].trim()); })[0];
+      if (gKey) {
+        res.kind = 'help';
+        res.answer = GLOSSARY[gKey][0];
+        res.suggestions = GLOSSARY[gKey][1].slice();
+        return finish();
+      }
+    }
+
+    // ---- social intents (only when the message carries no shopping content)
+    if (!signals) {
+      if (RX.smalltalk.test(ql)) {
+        res.kind = 'smalltalk';
+        if (RX.joke.test(ql)) res.answer = JOKES[((state && state.turn) || 0) % JOKES.length] + '\n\nWant me to find you something?';
+        else if (/\bhow are|how r u|hows it|how is it|how (is|was) your day|whats up|wassup|\bsup\b/.test(ql)) res.answer = 'Doing great, thanks for asking! Ready to help you find the right gadget — what are you shopping for today?';
+        else if (/\blol\b|\blmao\b|\brofl\b|\bha(ha)+\b|\bhe(he)+\b|\bfunny\b/.test(ql)) res.answer = 'Glad that made you smile! Anything I can help you find?';
+        else if (/\bdumb\b|\bstupid\b|\buseless\b|\bbad bot\b/.test(ql)) res.answer = 'Sorry about that — I\'ll do better. Tell me what you\'re looking for (a category, budget or use) and I\'ll find the best match.';
+        else res.answer = 'Aw, thanks! I\'m happiest helping people pick gadgets — what can I find for you?';
+        return finish();
+      }
+      if (RX.bye.test(ql)) {
+        res.kind = 'thanks';
+        res.answer = 'Bye for now! Come back any time you need help choosing a gadget.';
+        return finish();
+      }
+      if (RX.thanks.test(ql)) {
+        res.kind = 'thanks';
+        res.answer = /\b(thanks?|thank you|thx|tysm|ty|thanku|thankyou|shukriya|dhanyavad|appreciate)/.test(ql) ? 'You\'re welcome! Anything else I can help you find?' : 'Great! Anything else I can help you find?';
+        return finish();
+      }
+      if (RX.help.test(ql)) {
+        res.kind = 'help';
+        res.answer = 'I\'m TechMart\'s shopping assistant. I only know our own catalog of **' + catalog.length + ' products** (' + catalogSummary(catalog).text + '), and I can:\n\n' +
+          '- **Recommend** something for your budget and use (gaming, video editing, coding, students, travel, workouts…)\n' +
+          '- **Answer questions** about a product — battery, RAM, ANC, price, stock\n' +
+          '- **Compare** two models side by side\n' +
+          '- **Browse** a category, cheapest first or by price\n\nFollow-ups like *"anything cheaper?"* or *"compare the top two"* work too.';
+        return finish();
+      }
+      if (RX.greeting.test(ql)) {
+        res.kind = 'greeting';
+        res.answer = 'Hi there! I\'m TechMart\'s shopping assistant. I can recommend, compare and answer questions about our ' + catalogSummary(catalog).text + '. What are you looking for today?';
+        return finish();
+      }
+    }
+    // strip a leading greeting from mixed messages ("hi, I need a laptop")
+    ql = ql.replace(/^(hi+|hello+|hey+|namaste|hola|good (morning|afternoon|evening))\b[\s,.-]*/, '').trim() || ql;
+
+    // ---- non-electronics items -> off topic
+    if (!cats.length && !pins.length && !unknown && RX.nonElec.test(ql) && !cur.use_case) {
+      var item = ql.match(RX.nonElec)[0];
+      res.kind = 'off_topic';
+      res.answer = 'We don\'t sell ' + (/s$/.test(item) || /clothes|clothing|food|furniture|groceries|jeans|cosmetics|makeup|insurance/.test(item) ? item : item + 's') +
+        ' — TechMart is an electronics store. We carry ' + catalogSummary(catalog).text + '. Can I help you with any of those?';
+      return finish();
+    }
+
+    // ---------------------------------------------------------------- helpers bound to this turn
+    function retrievalTurn(plan, text, kOverride) {
+      var r = runPlan(text, catalog, plan, stage, kOverride || k);
+      if (plan.cheaper_than || plan.sport_earbuds) {  // chat-only hard filters
+        var retc = r.retrieval;
+        var keepFn = function (x) {
+          if (plan.cheaper_than && x.product.price >= plan.cheaper_than.price) return false;
+          if (plan.sport_earbuds && x.product.category === 'Earbuds' && ATTRS.water.get(x.product) < 5) return false;
+          return true;
+        };
+        var kept = retc.all_ranked.filter(keepFn);
+        if (kept.length !== retc.all_ranked.length) {
+          retc.funnel.splice(retc.funnel.length - 1, 0, { label: plan.cheaper_than ? 'Cheaper than ' + plan.cheaper_than.name : 'Sport earbuds (IP55+)', count: kept.length });
+          retc.all_ranked = kept; retc.results = kept.slice(0, kOverride || k); retc.candidates_count = kept.length;
+          retc.excluded = retc.excluded.filter(function (e) { return !plan.cheaper_than || e.product.price < plan.cheaper_than.price; });
+          r.prompt = buildPrompt(text, { stage: stage === 1 ? 2 : stage, retrieval: retc });
+        }
+      }
+      if (plan.need_gps) {  // GPS is not a hard filter in retrieve(); apply it here
+        var ret0 = r.retrieval;
+        var g = ret0.all_ranked.filter(function (x) { return attr(x.product, 'gps') === true; });
+        if (g.length) {
+          ret0.funnel.splice(ret0.funnel.length - 1, 0, { label: 'GPS', count: g.length });
+          ret0.all_ranked = g; ret0.results = g.slice(0, kOverride || k); ret0.candidates_count = g.length;
+          g.forEach(function (x) { if (x.why.indexOf('Built-in GPS') === -1) x.why.push('Built-in GPS'); });
+          r.prompt = buildPrompt(text, { stage: stage === 1 ? 2 : stage, retrieval: ret0 });
+        }
+      }
+      res.run = r; res.resolved_query = text;
+      planForState = plan;
+      return r;
+    }
+    function setRecommendation(r, lead) {
+      var ret = r.retrieval;
+      if (!ret.results.length) return false;
+      res.kind = 'recommendation';
+      res.answer = (lead ? lead + '\n\n' : '') + recommendationAnswer(r.question, ret).replace(/\bsame no ANC\b/g, 'also no ANC');
+      res.products = cardsFromResults(ret.results, 3);
+      listForPrompt = ret.results.slice(0, 5).map(function (x) { return x.product; });
+      ctx = { cats: ret.categories_used.length ? ret.categories_used : uniq(ret.results.map(function (x) { return x.product.category; })).slice(0, 1), count: ret.results.length, plan: ret.plan };
+      idsForState = ret.results.slice(0, 5).map(function (x) { return x.product.id; });
+      return true;
+    }
+    function setList(r, mode, lead) {
+      var ret = r.retrieval;
+      var ranked = ret.all_ranked.map(function (x) { return x; });
+      if (mode === 'priciest') ranked.sort(function (a, b) { return b.product.price - a.product.price; });
+      if (mode === 'cheapest') ranked.sort(function (a, b) { return a.product.price - b.product.price; });
+      if (!ranked.length) return false;
+      var shown = ranked.slice(0, 6);
+      var cats2 = ret.categories_used;
+      var noun = catsNoun(cats2);
+      var scope = scopePhrase(ret);
+      var out = [];
+      if (lead) out.push(lead);
+      if (ret.relaxed) out.push(relaxedLead(ret));
+      if (mode === 'cheapest') {
+        var c0 = shown[0].product;
+        out.push('The most affordable of our ' + scope + ' is the **' + c0.name + '** at **' + inr(c0.price) + '** (' + specBits(c0, 3).join(', ') + ').');
+        if (shown.length > 1) out.push('Next up by price:\n' + shown.slice(1, 5).map(function (x) { return bullet(x.product); }).join('\n'));
+      } else if (mode === 'priciest') {
+        var e0 = shown[0].product;
+        out.push('Our most premium ' + CAT_WORD[e0.category] + (cats2.length ? '' : ' overall') + ' is the **' + e0.name + '** at **' + inr(e0.price) + '** (' + specBits(e0, 3).join(', ') + ').');
+        if (shown.length > 1) out.push('Next by price:\n' + shown.slice(1, 5).map(function (x) { return bullet(x.product); }).join('\n'));
+      } else {
+        var total = ret.candidates_count;
+        var forWhat = ret.plan.use_case ? ' for ' + ret.plan.use_case_label : '';
+        out.push((total > shown.length ? 'Here are the top ' + shown.length + ' of our ' + total + ' ' : 'Here ' + (shown.length === 1 ? 'is' : 'are') + ' our ') + scope + forWhat + ':');
+        out.push(shown.map(function (x) { return bullet(x.product); }).join('\n'));
+        if (shown.length > 1 && (ret.profile.length || ret.plan.use_case)) out.push('**Top pick: ' + shown[0].product.name + ' (' + inr(shown[0].product.price) + ')** — ' + joinNatural(topReasons(shown[0], 4).map(stripBest).filter(function (w) { return w.charAt(0) !== '₹'; }).slice(0, 3)) + '.');
+        else if (shown.length > 1) out.push('Want a recommendation? Tell me your budget or what you\'ll use it for.');
+      }
+      res.kind = 'list';
+      res.answer = out.join('\n\n');
+      res.products = shown.slice(0, 3).map(function (x, i) { return card(x.product, x.why.filter(function (w) { return w !== 'Named in your question'; }), i === 0 && mode !== 'priciest' && (ret.profile.length || mode === 'cheapest') ? 'Best pick' : ''); });
+      listForPrompt = shown.map(function (x) { return x.product; });
+      idsForState = shown.map(function (x) { return x.product.id; });
+      ctx = { cats: cats2.length ? cats2 : [shown[0].product.category], count: shown.length, cheapest: mode === 'cheapest', plan: ret.plan };
+      void noun;
+      return true;
+    }
+    function setProduct(p, qText, ucId, extraLead) {
+      var restTxt = wordTokens(qText || '').filter(function (t) { return !STOPWORDS.has(t) && !/^(tell|more|about|details|info|specs?|first|second|third|one|is|it|the)$/.test(t); }).join(' ');
+      var resolved = p.name + (restTxt ? ' ' + restTxt : '');
+      var pa = null;
+      var key = detectAttr(qText || '');
+      // RAM questions reuse the original engine's pinned answer (keeps the assignment answer identical in tone)
+      var plan = parseQuery(resolved, catalog);
+      if (ucId && !plan.use_case) { plan.use_case = ucId; plan.use_case_label = ucById(ucId).label; recomputeWeights(plan); }
+      var r = retrievalTurn(plan, resolved);
+      var inRes = r.retrieval.results.some(function (x) { return x.pinned && x.product.id === p.id; });
+      if (key === 'ram' && inRes && attr(p, 'ram_gb') != null) pa = { text: pinnedAnswer(resolved, r.retrieval), alt: null };
+      if (!pa) pa = productAnswer(p, qText || '', catalog, ucId || plan.use_case);
+      res.kind = 'product_question';
+      res.answer = (extraLead ? extraLead + '\n\n' : '') + pa.text;
+      res.products = [card(p, null, '')];
+      if (pa.alt) res.products.push(card(pa.alt, null, ''));
+      listForPrompt = [p].concat(pa.alt ? [pa.alt] : []);
+      idsForState = [p.id].concat(pa.alt ? [pa.alt.id] : []);
+      planForState = makePlan({ categories: [p.category], use_case: ucId || plan.use_case });
+      ctx = { cats: [p.category], product: p, alt: pa.alt || closestSibling(p), uc: ucId || plan.use_case };
+      return true;
+    }
+    function closestSibling(p) {
+      return catalog.filter(function (q) { return q.id !== p.id && q.category === p.category; })
+        .sort(function (x, y) { return Math.abs(x.price - p.price) - Math.abs(y.price - p.price); })[0] || null;
+    }
+    function unknownName(u) {
+      var generic = /^(standalone|TVs)/.test(u.label);
+      var brandOnly = !u.labelled || u.label === 'Apple' || u.label === 'Samsung Galaxy';
+      if (generic) return '**' + u.label + '**';
+      return brandOnly ? '**' + u.label.replace(/ Galaxy$/, '') + ' products**' : 'the **' + u.label + '**';
+    }
+    function setCompare(a, b, ucId, lead) {
+      res.kind = 'compare';
+      res.resolved_query = 'compare ' + a.name + ' vs ' + b.name;
+      if (unknown) lead = 'Sorry, we don\'t carry ' + unknownName(unknown) + ' — TechMart only stocks its own catalog. Here\'s how our closest options compare:' + (lead ? '\n\n' + lead : '');
+      res.answer = (lead ? lead + '\n\n' : '') + compareAnswer(a, b, ucId);
+      res.products = [card(a, null, ''), card(b, null, '')];
+      listForPrompt = [a, b];
+      idsForState = [a.id, b.id];
+      var plan = makePlan({ categories: uniq([a.category, b.category]), use_case: ucId });
+      res.run = runPlan(res.resolved_query, catalog, makePlan({ categories: uniq([a.category, b.category]), use_case: ucId, pinned_ids: [a.id, b.id] }), stage, k);
+      planForState = plan;
+      ctx = { cats: [a.category] };
+      return true;
+    }
+    function refProduct(i) {
+      if (!lastProducts.length) return null;
+      return i === -1 ? lastProducts[lastProducts.length - 1] : (lastProducts[i] || null);
+    }
+    function stripRefs(s) {
+      return s.replace(RX.ordinal, ' ').replace(/\b(tell me more about|tell me about|more about|what about|how about|the|it|its|this one|that one|this|that|one)\b/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    // ---- compare
+    if (isCompare && !(unknown && pins.length < 2)) {
+      var pair = null;
+      var cpUc = cur.use_case || (lastPlan && lastPlan.use_case) || null;
+      if (pins.length >= 2) pair = [meta.byId[pins[0].id], meta.byId[pins[1].id]];
+      else if (pins.length === 1 && lastProducts.length) {
+        var other = lastProducts.filter(function (p) { return p.id !== pins[0].id; })[0];
+        if (other) pair = [meta.byId[pins[0].id], other];
+      } else if (ords.length >= 2 && lastProducts.length) {
+        var o1 = refProduct(ords[0]), o2 = refProduct(ords[1]);
+        if (o1 && o2 && o1 !== o2) pair = [o1, o2];
+      } else if (!cats.length && lastProducts.length >= 2) pair = [lastProducts[0], lastProducts[1]];
+      if (!pair && cats.length) {
+        var cplan = parseQuery(ql.replace(RX.compare, ' '), catalog);
+        augmentPlan(cplan, ql);
+        var cr = runPlan(ql, catalog, cplan, stage, k);
+        if (cr.retrieval.results.length >= 2) {
+          pair = [cr.retrieval.results[0].product, cr.retrieval.results[1].product];
+          cpUc = cplan.use_case;
+        }
+      }
+      if (pair) {
+        setCompare(pair[0], pair[1], cpUc, pins.length === 1 && pair[1] === lastProducts.filter(function (p) { return p.id !== pins[0].id; })[0] ? 'Comparing it with the **' + pair[1].name + '** from before:' : null);
+        return finish();
+      }
+      if (pins.length === 1) { setProduct(meta.byId[pins[0].id], ql, cur.use_case); return finish(); }
+      res.kind = 'clarify';
+      res.answer = 'Happy to compare! Which two products should I put side by side? For example *"Zentra Vision 15 vs Pixelon Slim 14"* or *"compare Vertex Aura Elite and Nova Pods Max"*.';
+      res.suggestions = ['Zentra Vision 15 vs Pixelon Slim 14', 'Compare Zentra Echo Buds 2 and Pixelon Tune Pro', 'What do you sell?'];
+      return finish();
+    }
+
+    // ---- follow-up: after a compare, "which is lighter / cheaper / has ANC?" answers among the two
+    if (hasState && !cats.length && !pins.length && state.last_kind === 'compare' && lastProducts.length >= 2 && /\bwhich\b|\bwho\b|\bbetter\b/.test(ql)) {
+      var sk = superlativeKey(ql);
+      var ucQ = cur.use_case;
+      if (ucQ) {
+        var two = lastProducts.slice(0, 2);
+        setCompare(two[0], two[1], ucQ);
+        return finish();
+      }
+      if (sk) {
+        var sa = superlativeAnswer(sk, lastProducts.slice(0, 2));
+        if (sa) {
+          res.kind = 'compare';
+          res.resolved_query = 'which ' + (KEY_PHRASE[sk] ? KEY_PHRASE[sk][0] : sk) + ': ' + lastProducts.slice(0, 2).map(function (p) { return p.name; }).join(' vs ');
+          res.answer = sa.text;
+          res.products = [card(sa.best, null, '')].concat(lastProducts.slice(0, 2).filter(function (p) { return p !== sa.best; }).map(function (p) { return card(p, null, ''); }));
+          listForPrompt = lastProducts.slice(0, 2);
+          idsForState = lastProducts.slice(0, 2).map(function (p) { return p.id; });
+          res.run = runPlan(res.resolved_query, catalog, makePlan({ categories: uniq(lastProducts.slice(0, 2).map(function (p) { return p.category; })), pinned_ids: idsForState }), stage, k);
+          planForState = lastPlan;
+          ctx = { cats: [lastProducts[0].category] };
+          return finish();
+        }
+      }
+    }
+
+    // ---- references to earlier products: "the first one", "tell me more about it", "does it have ANC?"
+    if (hasState && !pins.length && !cats.length && lastProducts.length) {
+      var refP = null;
+      if (ords.length) refP = refProduct(ords[0]);
+      else if (RX.pronoun.test(ql) && (RX.detail.test(ql) || detectAttr(ql) || cur.use_case) && !RX.cheaper.test(ql) && !RX.pricier.test(ql) && !RX.more.test(ql) && !hasPrice) refP = lastProducts[0];
+      else if (/^(tell me more|more details|details|specs|more info)$/.test(ql)) refP = lastProducts[0];
+      else if (detectAttr(ql) && tokCount <= 4 && !/\b(which|more|better|bigger|longer|less|lighter|best|most|good|great|high|higher|with|without)\b/.test(ql) && !cur.use_case) refP = lastProducts[0];  // "price?", "battery?"
+      if (refP && !(hasPrice || RX.cheaper.test(ql) || RX.pricier.test(ql) || RX.more.test(ql))) {
+        setProduct(refP, stripRefs(ql), cur.use_case);
+        return finish();
+      }
+    }
+
+    // ---- follow-up refinement of the previous search
+    var isRefine = hasState && lastPlan && !pins.length && (!unknown || (unknown.generic && !unknown.accessory && !/\b(sell|have|carry|stock)\b/.test(ql))) && (
+      (!cats.length && (RX.cheaper.test(ql) || RX.pricier.test(ql) || RX.more.test(ql) || RX.refine.test(ql) ||
+        (tokCount <= 6 && (hasPrice || cur.use_case || cur.need_anc || cur.need_wireless || Object.keys(cur.boosts).length || EXTRA_BOOSTS.some(function (b) { return b.key !== 'price' && b.re.test(ql); })))) ||
+      (cats.length && /^(and|what about|how about|ok(ay)? (and|what about))\b/.test(ql))));
+    if (isRefine) {
+      var plan = cloneJSON(lastPlan);
+      plan.pinned_ids = []; plan.boosts = plan.boosts || {}; plan.keywords = plan.keywords || []; plan.categories = plan.categories || [];
+      var changes = [];
+      var lead = null;
+      var top = lastProducts[0] || null;
+      if (cats.length) {  // "what about tablets?" -> new category, keep the use case
+        plan.categories = cats; plan.price_max = null; plan.price_min = null; plan.keywords = [];
+        plan.need_anc = cur.need_anc; plan.need_wireless = cur.need_wireless;
+        plan.boosts = {};
+        Object.keys(cur.boosts).forEach(function (bk) { plan.boosts[bk] = cur.boosts[bk]; });
+      } else {
+        // the last cards were all one category (e.g. Headset after "which has ANC?") -> stay on it
+        var lastCats = uniq(lastProducts.slice(0, 3).map(function (p) { return p.category; }));
+        if (lastCats.length === 1 && (!plan.categories.length || plan.categories.indexOf(lastCats[0]) !== -1)) plan.categories = [lastCats[0]];
+      }
+      if (hasPrice) { plan.price_max = cur.price_max; plan.price_min = cur.price_min; delete plan.cheaper_than; }
+      if (cur.use_case) { plan.use_case = cur.use_case; plan.use_case_label = cur.use_case_label; changes.push('for ' + cur.use_case_label); }
+      if (plan.use_case === 'workout' && !cats.length) applyFitnessScope(plan);
+      if (cur.need_anc && !plan.need_anc) plan.need_anc = true;
+      if (/\bgps\b/.test(ql) && !plan.need_gps) { plan.need_gps = true; changes.push('with GPS'); }
+      if (cur.need_wireless) plan.need_wireless = true;
+      if (/\bwithout (anc|noise)/.test(ql)) plan.need_anc = false;
+      Object.keys(cur.boosts).forEach(function (bk) { if (bk !== 'anc' || !plan.need_anc) plan.boosts[bk] = cur.boosts[bk]; });
+      var boosted = augmentPlan(plan, ql, { skip: plan.price_max != null || RX.cheaper.test(ql) ? ['price'] : [] });
+      kwKnown.forEach(function (t) { if (plan.keywords.indexOf(t) === -1 && !STRUCTURAL_TOKENS.has(t)) plan.keywords.push(t); });
+      var cheaper = RX.cheaper.test(ql) && !hasPrice;
+      var pricier = !cheaper && RX.pricier.test(ql) && !hasPrice;
+      if (cheaper && top) {
+        // internal bound: price <= top.price, then anything at or above top.price is dropped in retrievalTurn
+        plan.price_max = Math.min(plan.price_max == null ? Infinity : plan.price_max, top.price);
+        plan.price_min = null;
+        plan.cheaper_than = { id: top.id, name: top.name, price: top.price };
+        lead = 'Here\'s what\'s cheaper than the **' + top.name + '** (' + inr(top.price) + '):';
+      } else if (pricier && top) {
+        plan.price_min = top.price + 1; plan.price_max = null; delete plan.cheaper_than;
+        lead = 'Stepping up from the **' + top.name + '** (' + inr(top.price) + '):';
+      }
+      recomputeWeights(plan);
+      if (!Object.keys(plan.weights).length) applyDefaultProfile(plan);
+      boosted.forEach(function (bk) { if (bk !== 'price' && BOOST_LABEL[bk]) changes.push('prioritising ' + BOOST_LABEL[bk]); });
+      var text = planToText(plan);
+      var showMore = RX.more.test(ql) && !cheaper && !pricier;
+      var r = retrievalTurn(plan, text, showMore ? 50 : k);
+      var ret = r.retrieval;
+      if (showMore) {
+        var seen = lastIds;
+        ret.results = ret.all_ranked.filter(function (x) { return seen.indexOf(x.product.id) === -1; }).slice(0, 6);
+        r.prompt = buildPrompt(text, { stage: stage === 1 ? 2 : stage, retrieval: ret });
+        if (!ret.results.length) {
+          res.kind = 'list';
+          res.answer = 'That\'s everything we have for **' + text + '** — you\'ve seen them all. Want to widen the budget or try a different category?';
+          res.products = lastProducts.slice(0, 3).map(function (p) { return card(p, null, ''); });
+          listForPrompt = lastProducts.slice(0, 3);
+          ctx = { cats: plan.categories, count: 0 };
+          return finish();
+        }
+        ret.all_ranked = ret.results;
+        ret.candidates_count = ret.results.length;
+        setList(r, null, 'More ' + catsNoun(plan.categories) + ' you haven\'t seen yet:');
+        res.answer = res.answer.replace(/^More ([^\n]*)\n\nHere (are|is) [^\n]*:/, 'More $1');
+        return finish();
+      }
+      if (cheaper && top && (ret.relaxed || !ret.results.length || ret.results[0].product.id === top.id)) {
+        res.kind = 'recommendation';
+        var cheapestSame = catalog.filter(function (p) { return plan.categories.indexOf(p.category) !== -1; }).sort(function (a, b) { return a.price - b.price; })[0];
+        res.answer = 'The **' + top.name + '** (' + inr(top.price) + ') is already the most affordable match' + (plan.use_case ? ' for ' + plan.use_case_label : '') + ' in our ' + catsNoun(plan.categories) + '.' +
+          (cheapestSame && cheapestSame.id !== top.id ? ' Our cheapest ' + CAT_WORD[cheapestSame.category] + ' overall is the **' + cheapestSame.name + '** (' + inr(cheapestSame.price) + '), but it\'s a weaker fit.' : '');
+        res.products = [card(top, null, 'Best pick')].concat(cheapestSame && cheapestSame.id !== top.id ? [card(cheapestSame, null, '')] : []);
+        listForPrompt = res.products.map(function (c) { return meta.byId[c.id]; });
+        ctx = { cats: plan.categories, count: 1, plan: plan };
+        plan.price_max = lastPlan.price_max; delete plan.cheaper_than; if (lastPlan.cheaper_than) plan.cheaper_than = lastPlan.cheaper_than; recomputeWeights(plan);
+        return finish();
+      }
+      if (!lead) lead = 'Got it — **' + scopePhrase(ret) + (plan.use_case ? ' for ' + plan.use_case_label : '') + '**' + (changes.length ? ', ' + joinNatural(uniq(changes).filter(function (c) { return !/^for /.test(c); })) : '') + ':';
+      lead = lead.replace(/, :$/, ':');
+      if (setRecommendation(r, lead)) {
+        if (cheaper) {
+          res.answer = res.answer.split(/\n\n/).filter(function (para) { return !/^Excluded \(/.test(para); }).join('\n\n');
+          if (top) res.answer = res.answer.split('under ' + inr(top.price)).join('cheaper than the ' + top.name);
+        }
+        return finish();
+      }
+      // nothing fits (e.g. a feature filter emptied the set)
+      res.kind = 'not_found';
+      res.answer = 'None of our ' + catsNoun(plan.categories) + ' match that' + (plan.need_anc ? ' with noise cancellation' : '') + '. ' + (lastProducts.length ? 'The earlier picks are still the closest:' : '');
+      res.products = lastProducts.slice(0, 3).map(function (p) { return card(p, null, ''); });
+      listForPrompt = lastProducts.slice(0, 3);
+      ctx = { cats: plan.categories, count: res.products.length };
+      return finish();
+    }
+
+    // ---- unknown product (not carried) -> closest in-catalog alternatives
+    if (unknown && !pins.length) {
+      res.kind = 'not_found';
+      var ucat = cats.length ? cats : unknown.cat ? [unknown.cat] : [];
+      if (!ucat.length) {
+        res.answer = 'We don\'t carry ' + (unknown.label || unknown.raw) + ' — TechMart only stocks ' + catalogSummary(catalog).text + '. Can I help you find one of those?';
+        return finish();
+      }
+      var uplan = makePlan({ categories: ucat, use_case: cur.use_case || unknown.uc, price_max: cur.price_max, price_min: cur.price_min, need_anc: cur.need_anc, need_wireless: cur.need_wireless, boosts: cur.boosts });
+      augmentPlan(uplan, ql.replace(unknown.rx, ' '));
+      if (unknown.boost) { addBoost(uplan, unknown.boost, 0.6); recomputeWeights(uplan); }
+      var utext = planToText(uplan);
+      var ur = retrievalTurn(uplan, utext, 6);
+      var alts = ur.retrieval.results.slice();
+      var hasProfile = ur.retrieval.profile.length > 0;
+      if (!hasProfile && !hasPrice) alts.sort(function (a, b) { return unknown.tier === 'budget' ? a.product.price - b.product.price : b.product.price - a.product.price; });
+      alts = alts.slice(0, 3);
+      var genericU = /^(standalone|TVs)/.test(unknown.label);
+      var brandOnly = !unknown.labelled || unknown.label === 'Apple' || unknown.label === 'Samsung Galaxy';
+      var name = brandOnly && !genericU ? unknown.label.replace(/ Galaxy$/, '') + ' products' : unknown.label;
+      var article = genericU || brandOnly ? '' : 'the ';
+      res.answer = 'Sorry, we don\'t carry ' + article + '**' + name + '** — TechMart only stocks the products in its own catalog.' +
+        (alts.length ? ' Here are the closest ' + catsNoun(ucat) + ' we do have' + (unknown.uc ? ' for ' + ucById(unknown.uc).label : '') + ':\n\n' + alts.map(function (x) { return bullet(x.product); }).join('\n') : '');
+      res.products = alts.map(function (x) { return card(x.product, null, ''); });
+      listForPrompt = alts.map(function (x) { return x.product; });
+      idsForState = alts.map(function (x) { return x.product.id; });
+      ctx = { cats: ucat, count: alts.length };
+      return finish();
+    }
+
+    // ---- named product(s)
+    if (pins.length >= 2) {
+      setCompare(meta.byId[pins[0].id], meta.byId[pins[1].id], cur.use_case);
+      return finish();
+    }
+    if (pins.length === 1) {
+      var pp = meta.byId[pins[0].id];
+      var rest = wordTokens(ql).filter(function (t, i) { return pins[0].idx.indexOf(i) === -1; }).join(' ');
+      setProduct(pp, rest, cur.use_case, unknown ? 'Sorry, we don\'t carry ' + unknownName(unknown) + ' — but here\'s the **' + pp.name + '** from our catalog:' : null);
+      return finish();
+    }
+
+    // ---- catalog overview
+    if (!cats.length && !cur.use_case && !hasPrice && !brands.length && RX.overview.test(ql)) {
+      res.kind = 'catalog_overview';
+      res.answer = overviewAnswer(catalog);
+      return finish();
+    }
+
+    // ---- fresh search: list / recommendation
+    var fplan = parseQuery(ql, catalog);
+    var softBefore = fplan.categories.length;
+    augmentPlan(fplan, ql, { skip: fplan.pinned_ids.length ? ['ram'] : [] });
+    fplan.pinned_ids = [];
+    if (/\bgps\b/.test(ql)) fplan.need_gps = true;
+    if (fplan.use_case === 'workout' && !softBefore) applyFitnessScope(fplan);
+    var softCat = !softBefore && fplan.categories.length > 0;
+    var cheapestQ = RX.cheapest.test(ql), priciestQ = RX.priciest.test(ql);
+    var hasProfile2 = Object.keys(fplan.weights).length > 0;
+
+    // budget / gift only, no category: best of each category within budget
+    if (!fplan.categories.length && !fplan.use_case && (hasPrice || RX.gift.test(ql)) && !kwKnown.length && !fplan.need_anc) {
+      var maxP = fplan.price_max, minP = fplan.price_min;
+      var picks = [];
+      CATEGORIES.forEach(function (c) {
+        var inCat = catalog.filter(function (p) { return p.category === c && (maxP == null || p.price <= maxP) && (minP == null || p.price >= minP) && p.in_stock !== false; });
+        if (inCat.length) picks.push(inCat.sort(function (a, b) { return b.price - a.price; })[0]);
+      });
+      var gtext = planToText(fplan);
+      retrievalTurn(fplan, gtext);
+      if (!picks.length) {
+        res.kind = 'not_found';
+        res.answer = 'Nothing in our catalog fits ' + (maxP != null ? 'under ' + inr(maxP) : 'that budget') + '. Our most affordable item is the **' +
+          catalog.slice().sort(function (a, b) { return a.price - b.price; })[0].name + '** (' + inr(catalog.slice().sort(function (a, b) { return a.price - b.price; })[0].price) + ').';
+        var cheapestAll = catalog.slice().sort(function (a, b) { return a.price - b.price; })[0];
+        res.products = [card(cheapestAll, null, '')];
+        ctx = { cats: [cheapestAll.category], count: 1 };
+        return finish();
+      }
+      res.kind = 'list';
+      res.answer = (RX.gift.test(ql) ? 'Great gift ideas' : 'The best of each category') + (maxP != null ? ' under ' + inr(maxP) : minP != null ? ' above ' + inr(minP) : '') + ':\n\n' +
+        picks.slice(0, 6).map(bullet).join('\n') + '\n\nTell me who it\'s for or what they\'ll use it for and I\'ll narrow it down.';
+      res.products = picks.slice(0, 3).map(function (p) { return card(p, null, ''); });
+      listForPrompt = picks.slice(0, 6);
+      idsForState = picks.slice(0, 6).map(function (p) { return p.id; });
+      ctx = { cats: [picks[0].category], count: picks.length };
+      return finish();
+    }
+
+    var hasContent = fplan.categories.length || fplan.use_case || fplan.need_anc || fplan.need_wireless || fplan.need_gps || brands.length || kwKnown.length ||
+      Object.keys(fplan.boosts).some(function (b) { return b !== 'price'; });
+    if (hasContent) {
+      var ftext = ql;
+      var lead2 = softCat ? 'For that, our ' + catsNoun(fplan.categories) + ' are the best fit.' : null;
+      var listy = RX.list.test(ql) || LIST_RE.test(ql);
+      var bareCat = fplan.categories.length && !fplan.use_case && !hasProfile2 && !hasPrice && !fplan.need_anc && !kwKnown.length && !RX.recWords.test(ql);
+      if (!Object.keys(fplan.weights).length && !cheapestQ && !priciestQ && !listy && !bareCat && !brands.length && !kwKnown.length) applyDefaultProfile(fplan);
+      var fr = retrievalTurn(fplan, ftext, listy || cheapestQ || priciestQ || bareCat ? 6 : k);
+      var fret = fr.retrieval;
+      if (brands.length) {  // brand filter ("zentra laptops", "show me nova products")
+        var bres = fret.all_ranked.filter(function (x) { return brands.indexOf(x.product.brand) !== -1; });
+        if (bres.length) {
+          fret.all_ranked = bres; fret.results = bres.slice(0, Math.max(k, 6)); fret.candidates_count = bres.length;
+          fret.funnel.push({ label: 'Brand: ' + brands.join(' / '), count: bres.length });
+          fr.prompt = buildPrompt(ftext, { stage: stage === 1 ? 2 : stage, retrieval: fret });
+          if (!fplan.categories.length || !(hasProfile2 || fplan.use_case)) {
+            setList(fr, cheapestQ ? 'cheapest' : priciestQ ? 'priciest' : null, null);
+            res.answer = res.answer.replace(/our (products|[a-z ]+?)(:| is)/, 'our ' + brands.join('/') + ' $1$2');
+            return finish();
+          }
+        }
+      }
+      if (fret.results.length && fret.mode === 'bm25_fallback' && !fret.results.some(function (x) { return x.bm25 > 0; })) {
+        // keyword-only query that matched nothing meaningful -> fall through to clarify
+      } else if (fret.results.length) {
+        if (priciestQ && !fplan.use_case) { setList(fr, 'priciest', lead2); return finish(); }
+        if (cheapestQ && !fplan.use_case && !(hasProfile2 && Object.keys(fplan.weights).some(function (w) { return w !== 'price'; }))) { setList(fr, 'cheapest', lead2); return finish(); }
+        if ((listy || bareCat) && fret.results.length > 1) { setList(fr, null, lead2); return finish(); }
+        setRecommendation(fr, lead2);
+        return finish();
+      } else {
+        // nothing matched hard filters (e.g. "speaker with ANC") -> drop features, show closest
+        var nplan = cloneJSON(fplan); nplan.need_anc = false; nplan.need_wireless = false; delete nplan.boosts.anc; recomputeWeights(nplan);
+        var nr = runPlan(ftext, catalog, nplan, stage, k);
+        res.kind = 'not_found';
+        res.run = fr;
+        var miss = fplan.need_anc ? 'noise cancellation' : fplan.need_wireless ? 'wireless connectivity' : 'those requirements';
+        res.answer = 'Sorry — none of our ' + catsNoun(fret.categories_used) + ' have ' + miss + '.' +
+          (nr.retrieval.results.length ? ' The closest ' + catsNoun(fret.categories_used) + ' we have:\n\n' + nr.retrieval.results.slice(0, 3).map(function (x) { return bullet(x.product); }).join('\n') : '');
+        res.products = nr.retrieval.results.slice(0, 3).map(function (x) { return card(x.product, null, ''); });
+        listForPrompt = res.products.map(function (c) { return meta.byId[c.id]; });
+        ctx = { cats: fret.categories_used, count: res.products.length };
+        return finish();
+      }
+    }
+
+    // ---- nothing product-related
+    if (RX.nonElec.test(ql)) {
+      res.kind = 'off_topic';
+      res.answer = 'That\'s not something TechMart sells — we\'re an electronics store with ' + catalogSummary(catalog).text + '. Can I help with any of those?';
+      return finish();
+    }
+    if (RX.generalQ.test(ql) && !RX.wantSomething.test(ql) && tokCount >= 2) {
+      res.kind = 'off_topic';
+      res.answer = 'I\'m TechMart\'s shopping assistant, so I can only help with our ' + catalogSummary(catalog).text + '. Ask me for a recommendation, a comparison or a product\'s specs!';
+      return finish();
+    }
+    res.kind = 'clarify';
+    res.answer = 'Happy to help you find something! What are you shopping for? We carry ' + catalogSummary(catalog).text +
+      '. Tell me what you\'ll use it for and your budget — e.g. *"laptop for coding under ₹60,000"*.';
+    return finish();
+  }
+
   var api = {
     CATEGORIES: CATEGORIES,
     STARTER_IDS: STARTER_IDS,
@@ -879,6 +2354,9 @@
     estimateTokens: estimateTokens,
     composeAnswer: composeAnswer,
     run: run,
+    converse: converse,
+    normalizeMessage: normalizeMessage,
+    findProducts: findProducts,
     callAnthropic: callAnthropic
   };
 

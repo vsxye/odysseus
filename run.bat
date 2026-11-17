@@ -85,6 +85,9 @@ set /a OLLAMA_TRIES=0
 curl -s -m 2 http://127.0.0.1:11434/api/version >nul 2>&1
 if not errorlevel 1 goto :model
 echo  [LLM] Starting Ollama...
+rem  Two parallel slots so two visitors can be answered at the same time.
+if not defined OLLAMA_NUM_PARALLEL set "OLLAMA_NUM_PARALLEL=2"
+if not defined OLLAMA_KEEP_ALIVE set "OLLAMA_KEEP_ALIVE=30m"
 start "Ollama" /min "%OLLAMA_EXE%" serve
 :wait_ollama
 ping -n 2 127.0.0.1 >nul
