@@ -8,7 +8,7 @@ line tool and tests, and a static web demo that runs fully in the browser.
 
 ## Live demo
 
-**https://cet-informal-tattoo-jackets.trycloudflare.com/web/**
+**https://jade-parfait-688e6f.netlify.app/web/**
 
 - This link is a Cloudflare tunnel to a laptop running `run.bat` / `scripts/serve.py`. It works only while that
   laptop, the server and the tunnel are running, and the address changes if the tunnel is restarted.
