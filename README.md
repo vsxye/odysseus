@@ -11,16 +11,11 @@ The project has two parts that follow the same logic:
 - a **web chat** (`web/`) that runs the same pipeline in JavaScript. It answers follow-up questions, streams
   replies from a small local LLM, and checks every reply against the catalog before showing it.
 
-## Live demo
+## Try it
 
-**https://seal-clause-med-laughing.trycloudflare.com/web/**
-
-- This link is a Cloudflare quick tunnel to a laptop that runs `run.bat` (which starts `scripts/serve.py` and
-  Ollama) plus `cloudflared`. It works only while that laptop, the server and the tunnel are running.
-- The address changes every time the tunnel is restarted. If the link is dead, the host laptop is off.
-- Answers come from the local model `qwen2.5:3b` running on that laptop. If the model is slow or down, you get the
-  rule-based answer instead. See "Answer sources" below.
-- To run your own copy, see "Run it on your own laptop (one click)".
+There is no hosted demo. Run it on your own laptop with one double-click (see the next section). Answers come
+from the local model `qwen2.5:3b`; if the model is slow or down, you get the rule-based answer instead. See
+"Answer sources" below.
 
 ## Run it on your own laptop (one click)
 
